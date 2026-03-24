@@ -47,5 +47,9 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>DrishtiAI needs camera access to read signboards and assist you.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>DrishtiAI needs microphone access for two-way voice assistance.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>DrishtiAI uses speech recognition to understand your responses.</string>
 </dict>
 </plist>

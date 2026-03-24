@@ -9,6 +9,8 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../services/voice_assistant_service.dart';
+
 enum HomeState { idle, permission, scanning }
 
 class HomeScreen extends StatefulWidget {
@@ -18,15 +20,22 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
+class _HomeScreenState extends State<HomeScreen>
+    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
   HomeState _currentState = HomeState.idle;
   bool _soundEnabled = true;
+  String _selectedLanguage = 'English';
 
   CameraController? _cameraController;
   bool _cameraReady = false;
   bool _isInitializingCamera = false;
   bool _isStreaming = false;
   String? _cameraError;
+
+  late final VoiceAssistantService _voiceAssistant;
+  late final AnimationController _micPulseController;
+  late final Animation<double> _micPulseAnimation;
+  late final VoidCallback _micListeningListener;
 
   late final TextRecognizer _latinTextRecognizer;
   late final TextRecognizer _devanagariTextRecognizer;
@@ -55,6 +64,28 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _latinTextRecognizer = TextRecognizer(script: _scriptByName('latin'));
     _devanagariTextRecognizer = TextRecognizer(script: _scriptByName('devanagari'));
     _tamilTextRecognizer = TextRecognizer(script: _scriptByName('tamil'));
+
+    _voiceAssistant = VoiceAssistantService();
+    unawaited(_voiceAssistant.initialize(localeId: 'en_IN'));
+
+    _micPulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    );
+    _micPulseAnimation = Tween<double>(begin: 1.0, end: 1.15).animate(
+      CurvedAnimation(parent: _micPulseController, curve: Curves.easeInOut),
+    );
+    _micListeningListener = () {
+      if (_voiceAssistant.isListening.value) {
+        if (!_micPulseController.isAnimating) {
+          _micPulseController.repeat(reverse: true);
+        }
+      } else {
+        _micPulseController.stop();
+        _micPulseController.value = 0;
+      }
+    };
+    _voiceAssistant.isListening.addListener(_micListeningListener);
   }
 
   @override
@@ -64,6 +95,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _latinTextRecognizer.close();
     _devanagariTextRecognizer.close();
     _tamilTextRecognizer.close();
+    _voiceAssistant.isListening.removeListener(_micListeningListener);
+    _micPulseController.dispose();
+    unawaited(_voiceAssistant.dispose());
     super.dispose();
   }
 
@@ -204,13 +238,21 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       fit: StackFit.expand,
       children: [
         _buildCameraPreview(),
-        if (_latestOcrText.isNotEmpty)
-          Positioned(
-            bottom: 110,
-            left: 24,
-            right: 24,
-            child: _buildOcrOverlay(),
+        Positioned(
+          bottom: 100,
+          left: 24,
+          right: 24,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _buildVoiceOverlay(),
+              if (_latestOcrText.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                _buildOcrOverlay(),
+              ],
+            ],
           ),
+        ),
         // Status Pill
         Positioned(
           bottom: 24,
@@ -274,6 +316,80 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
+  Widget _buildVoiceOverlay() {
+    return ValueListenableBuilder<bool>(
+      valueListenable: _voiceAssistant.isListening,
+      builder: (context, isListening, _) {
+        return ValueListenableBuilder<String>(
+          valueListenable: _voiceAssistant.liveTranscript,
+          builder: (context, transcript, __) {
+            return ValueListenableBuilder<String?>(
+              valueListenable: _voiceAssistant.lastError,
+              builder: (context, error, ___) {
+                if (!isListening && transcript.isEmpty && (error == null || error.isEmpty)) {
+                  return const SizedBox.shrink();
+                }
+                final displayText = transcript.isEmpty
+                    ? (isListening ? 'Listening...' : 'Voice ready')
+                    : transcript;
+                return Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.75),
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Row(
+                        children: [
+                          AnimatedBuilder(
+                            animation: _micPulseAnimation,
+                            builder: (context, child) {
+                              final scale = isListening ? _micPulseAnimation.value : 1.0;
+                              return Transform.scale(scale: scale, child: child);
+                            },
+                            child: const Icon(Icons.mic, color: Colors.white, size: 28),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Text(
+                              displayText,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: GoogleFonts.outfit(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (error != null && error.isNotEmpty && !isListening) ...[
+                        const SizedBox(height: 6),
+                        Text(
+                          error,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.outfit(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w500,
+                            color: const Color(0xFFFFC8C8),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                );
+              },
+            );
+          },
+        );
+      },
+    );
+  }
+
   Widget _buildTopRightSettings() {
     return Positioned(
       top: 16,
@@ -322,9 +438,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _latestOcrText = '';
     });
 
-    final permission = await Permission.camera.request();
-    if (!permission.isGranted) {
-      final message = permission.isPermanentlyDenied
+    final cameraPermission = await Permission.camera.request();
+    if (!cameraPermission.isGranted) {
+      final message = cameraPermission.isPermanentlyDenied
           ? 'Camera permission denied. Please enable it in Settings.'
           : 'Camera permission denied. Tap Grant Access to try again.';
       if (!mounted) return;
@@ -333,6 +449,34 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         _currentState = HomeState.permission;
       });
       return;
+    }
+
+    final micPermission = await Permission.microphone.request();
+    if (!micPermission.isGranted) {
+      final message = micPermission.isPermanentlyDenied
+          ? 'Microphone permission denied. Please enable it in Settings.'
+          : 'Microphone permission denied. Tap Grant Access to try again.';
+      if (!mounted) return;
+      setState(() {
+        _cameraError = message;
+        _currentState = HomeState.permission;
+      });
+      return;
+    }
+
+    if (Platform.isIOS) {
+      final speechPermission = await Permission.speech.request();
+      if (!speechPermission.isGranted) {
+        final message = speechPermission.isPermanentlyDenied
+            ? 'Speech recognition permission denied. Please enable it in Settings.'
+            : 'Speech recognition permission denied. Tap Grant Access to try again.';
+        if (!mounted) return;
+        setState(() {
+          _cameraError = message;
+          _currentState = HomeState.permission;
+        });
+        return;
+      }
     }
 
     await _initializeCamera();
@@ -496,6 +640,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       setState(() => _latestOcrText = cleaned);
     }
     debugPrint('OCR: $cleaned');
+    if (_soundEnabled) {
+      unawaited(
+        _voiceAssistant.onSignboardDetected(
+          cleaned,
+          onUserResponse: _handleUserResponse,
+        ),
+      );
+    }
   }
 
   TextRecognitionScript _scriptByName(String name) {
@@ -518,6 +670,29 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final intersection = aTokens.intersection(bTokens).length;
     final union = aTokens.union(bTokens).length;
     return union == 0 ? 0 : intersection / union;
+  }
+
+  Future<void> _handleUserResponse(String text) async {
+    if (!_soundEnabled) return;
+    final normalized = text.toLowerCase();
+    if (normalized.contains('yes') ||
+        normalized.contains('haan') ||
+        normalized.contains('help') ||
+        normalized.contains('haanji')) {
+      await _voiceAssistant.speak(
+        'Okay. Tell me what you need, and I will help you.',
+      );
+      return;
+    }
+    if (normalized.contains('no') || normalized.contains('nah') || normalized.contains('nahi')) {
+      await _voiceAssistant.speak(
+        'Alright. I am here if you need anything else.',
+      );
+      return;
+    }
+    await _voiceAssistant.speak(
+      'Thanks. I heard: $text. I will try to assist.',
+    );
   }
 
   void _showSettingsBottomSheet() {
@@ -556,11 +731,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   Text('Language', style: GoogleFonts.outfit(fontSize: 18, fontWeight: FontWeight.w600, color: const Color(0xFF1A1A1A))),
                   const SizedBox(height: 8),
                   DropdownButtonFormField<String>(
-                    value: 'English',
-                    items: ['English', 'Hindi', 'Spanish'].map((lang) {
+                    value: _selectedLanguage,
+                    items: ['English', 'Hindi'].map((lang) {
                       return DropdownMenuItem(value: lang, child: Text(lang, style: const TextStyle(fontSize: 18)));
                     }).toList(),
-                    onChanged: (val) {},
+                    onChanged: (val) {
+                      if (val == null) return;
+                      setModalState(() => _selectedLanguage = val);
+                      setState(() => _selectedLanguage = val);
+                      final localeId = _selectedLanguage == 'Hindi' ? 'hi_IN' : 'en_IN';
+                      unawaited(_voiceAssistant.setLocale(localeId));
+                    },
                   ),
                   const SizedBox(height: 24),
                   // Emergency Contact
@@ -585,6 +766,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     onChanged: (val) {
                       setModalState(() => _soundEnabled = val);
                       setState(() => _soundEnabled = val); // Update parent too
+                      if (!val) {
+                        unawaited(_voiceAssistant.stop());
+                      }
                     },
                     activeColor: const Color(0xFF1A56DB),
                   ),
