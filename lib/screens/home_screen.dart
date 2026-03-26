@@ -7,9 +7,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import 'package:image/image.dart' as img;
 import 'package:permission_handler/permission_handler.dart';
 
 import '../services/voice_assistant_service.dart';
+import '../services/gemini_service.dart';
 
 enum HomeState { idle, permission, scanning }
 
@@ -22,7 +24,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen>
     with WidgetsBindingObserver, SingleTickerProviderStateMixin {
-  HomeState _currentState = HomeState.idle;
+  HomeState _currentState = HomeState.permission;
   bool _soundEnabled = true;
   String _selectedLanguage = 'English';
 
@@ -33,6 +35,7 @@ class _HomeScreenState extends State<HomeScreen>
   String? _cameraError;
 
   late final VoiceAssistantService _voiceAssistant;
+  late final GeminiService _geminiService;
   late final AnimationController _micPulseController;
   late final Animation<double> _micPulseAnimation;
   late final VoidCallback _micListeningListener;
@@ -46,9 +49,19 @@ class _HomeScreenState extends State<HomeScreen>
   DateTime _lastEmitTime = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastEmittedText = '';
   String _latestOcrText = '';
+  String _latestSmartText = '';
+  String? _latestGeminiError;
+  DateTime _lastSpokenTime = DateTime.fromMillisecondsSinceEpoch(0);
+  String _lastSpokenText = '';
+  DateTime _lastGeminiCall = DateTime.fromMillisecondsSinceEpoch(0);
+  String _lastGeminiText = '';
+  bool _geminiInFlight = false;
+  bool _latestSmartEmpty = false;
 
-  static const Duration _analysisInterval = Duration(milliseconds: 800);
+  static const Duration _analysisInterval = Duration(milliseconds: 500);
   static const Duration _emitCooldown = Duration(milliseconds: 1500);
+  static const Duration _speechCooldown = Duration(seconds: 4);
+  static const Duration _geminiCooldown = Duration(seconds: 6);
 
   static const Map<DeviceOrientation, int> _deviceRotation = {
     DeviceOrientation.portraitUp: 0,
@@ -65,7 +78,8 @@ class _HomeScreenState extends State<HomeScreen>
     _devanagariTextRecognizer = TextRecognizer(script: _scriptByName('devanagari'));
     _tamilTextRecognizer = TextRecognizer(script: _scriptByName('tamil'));
 
-    _voiceAssistant = VoiceAssistantService();
+    _voiceAssistant = VoiceAssistantService(enableSpeech: false);
+    _geminiService = GeminiService();
     unawaited(_voiceAssistant.initialize(localeId: 'en_IN'));
 
     _micPulseController = AnimationController(
@@ -132,7 +146,7 @@ class _HomeScreenState extends State<HomeScreen>
   Widget _buildMainContent() {
     switch (_currentState) {
       case HomeState.idle:
-        return _buildIdleState();
+        return _buildPermissionState();
       case HomeState.permission:
         return _buildPermissionState();
       case HomeState.scanning:
@@ -192,13 +206,13 @@ class _HomeScreenState extends State<HomeScreen>
                 const Icon(Icons.camera_alt_rounded, size: 48, color: Color(0xFF1A56DB)),
                 const SizedBox(height: 16),
                 Text(
-                  'Camera & Microphone Access',
+                  'Camera Access',
                   style: GoogleFonts.outfit(fontSize: 24, fontWeight: FontWeight.bold, color: const Color(0xFF1A1A1A)),
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 12),
                 Text(
-                  'DrishtiAI needs access to your camera and microphone to assist you.',
+                  'DrishtiAI needs access to your camera to read signboards.',
                   style: GoogleFonts.outfit(fontSize: 18, color: const Color(0xFF4A4A4A)),
                   textAlign: TextAlign.center,
                 ),
@@ -246,9 +260,9 @@ class _HomeScreenState extends State<HomeScreen>
             mainAxisSize: MainAxisSize.min,
             children: [
               _buildVoiceOverlay(),
-              if (_latestOcrText.isNotEmpty) ...[
+              if (_latestGeminiError != null || _latestSmartText.isNotEmpty || _latestOcrText.isNotEmpty) ...[
                 const SizedBox(height: 12),
-                _buildOcrOverlay(),
+                _buildSmartOverlay(),
               ],
             ],
           ),
@@ -451,34 +465,6 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
 
-    final micPermission = await Permission.microphone.request();
-    if (!micPermission.isGranted) {
-      final message = micPermission.isPermanentlyDenied
-          ? 'Microphone permission denied. Please enable it in Settings.'
-          : 'Microphone permission denied. Tap Grant Access to try again.';
-      if (!mounted) return;
-      setState(() {
-        _cameraError = message;
-        _currentState = HomeState.permission;
-      });
-      return;
-    }
-
-    if (Platform.isIOS) {
-      final speechPermission = await Permission.speech.request();
-      if (!speechPermission.isGranted) {
-        final message = speechPermission.isPermanentlyDenied
-            ? 'Speech recognition permission denied. Please enable it in Settings.'
-            : 'Speech recognition permission denied. Tap Grant Access to try again.';
-        if (!mounted) return;
-        setState(() {
-          _cameraError = message;
-          _currentState = HomeState.permission;
-        });
-        return;
-      }
-    }
-
     await _initializeCamera();
   }
 
@@ -486,6 +472,14 @@ class _HomeScreenState extends State<HomeScreen>
     if (_isInitializingCamera) return;
     _isInitializingCamera = true;
     try {
+      final existingController = _cameraController;
+      if (existingController != null) {
+        if (existingController.value.isInitialized) {
+          return;
+        }
+        await _disposeController(existingController);
+        _cameraController = null;
+      }
       final cameras = await availableCameras();
       if (cameras.isEmpty) {
         throw Exception('No cameras available on this device.');
@@ -524,16 +518,113 @@ class _HomeScreenState extends State<HomeScreen>
 
   void _stopCamera() {
     final controller = _cameraController;
+    if (controller == null) return;
+    if (mounted) {
+      setState(() {
+        _cameraController = null;
+        _cameraReady = false;
+        _isStreaming = false;
+      });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        unawaited(_disposeController(controller));
+      });
+      return;
+    }
     _cameraController = null;
     _cameraReady = false;
     _isStreaming = false;
-    if (controller == null) return;
-    unawaited(controller.stopImageStream().catchError((_) {}));
-    unawaited(controller.dispose().catchError((_) {}));
+    unawaited(_disposeController(controller));
+  }
+
+  Widget _buildSmartOverlay() {
+    final hasError = _latestGeminiError != null && _latestGeminiError!.isNotEmpty;
+    final hasSmart = _latestSmartText.isNotEmpty;
+
+    String title;
+    String body;
+    Color accentColor;
+
+    if (hasError) {
+      title = 'Smart reading unavailable';
+      body = _latestGeminiError!;
+      accentColor = const Color(0xFFFFA3A3);
+    } else if (hasSmart) {
+      title = 'Smart reading';
+      body = _latestSmartText;
+      accentColor = const Color(0xFFB6F3C2);
+    } else if (_latestSmartEmpty) {
+      title = 'No useful text found yet';
+      body = 'Try moving closer or centering the signboard.';
+      accentColor = const Color(0xFFFFE4A3);
+    } else {
+      title = 'Analyzing signboard...';
+      body = _latestOcrText.isNotEmpty
+          ? _truncateText(_latestOcrText, maxChars: 140)
+          : 'Point your camera at a signboard.';
+      accentColor = const Color(0xFFB3D4FF);
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.75),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: accentColor.withValues(alpha: 0.9), width: 1),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Icon(
+                hasError ? Icons.error_outline : Icons.auto_awesome,
+                color: accentColor,
+                size: 20,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  title,
+                  style: GoogleFonts.outfit(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    color: accentColor,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            body,
+            maxLines: 4,
+            overflow: TextOverflow.ellipsis,
+            style: GoogleFonts.outfit(
+              fontSize: 16,
+              fontWeight: FontWeight.w600,
+              color: Colors.white,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _disposeController(CameraController controller) async {
+    try {
+      if (controller.value.isStreamingImages) {
+        await controller.stopImageStream();
+      }
+    } catch (_) {}
+    try {
+      await controller.dispose();
+    } catch (_) {}
   }
 
   Future<void> _processCameraImage(CameraImage image) async {
     if (_isProcessingFrame) return;
+    if (!mounted || _currentState != HomeState.scanning) return;
     final now = DateTime.now();
     if (now.difference(_lastAnalysisTime) < _analysisInterval) return;
     _isProcessingFrame = true;
@@ -547,7 +638,7 @@ class _HomeScreenState extends State<HomeScreen>
         _tamilTextRecognizer.processImage(inputImage),
       ]);
       final mergedText = _mergeRecognizedText(results);
-      _maybeEmitText(mergedText);
+      _handleOcrResult(mergedText, image);
     } catch (error) {
       debugPrint('OCR error: $error');
     } finally {
@@ -559,13 +650,25 @@ class _HomeScreenState extends State<HomeScreen>
     final controller = _cameraController;
     if (controller == null) return null;
     final rotation = _rotationForImage(controller.description, controller.value.deviceOrientation);
-    final format = InputImageFormatValue.fromRawValue(image.format.raw);
-    if (format == null) return null;
-    if (Platform.isAndroid && format != InputImageFormat.yuv420) return null;
-    if (Platform.isIOS && format != InputImageFormat.bgra8888) return null;
-
-    final bytes = _concatenatePlanes(image.planes);
     final size = Size(image.width.toDouble(), image.height.toDouble());
+
+    if (Platform.isAndroid) {
+      final nv21 = _convertToNv21(image);
+      final metadata = InputImageMetadata(
+        size: size,
+        rotation: rotation,
+        format: InputImageFormat.nv21,
+        bytesPerRow: image.width,
+      );
+      return InputImage.fromBytes(bytes: nv21, metadata: metadata);
+    }
+
+    final format = InputImageFormatValue.fromRawValue(image.format.raw);
+    if (format == null) {
+      debugPrint('Unsupported camera format: ${image.format.raw}');
+      return null;
+    }
+    final bytes = _concatenatePlanes(image.planes);
     final metadata = InputImageMetadata(
       size: size,
       rotation: rotation,
@@ -573,6 +676,46 @@ class _HomeScreenState extends State<HomeScreen>
       bytesPerRow: image.planes.first.bytesPerRow,
     );
     return InputImage.fromBytes(bytes: bytes, metadata: metadata);
+  }
+
+  Uint8List _convertToNv21(CameraImage image) {
+    final width = image.width;
+    final height = image.height;
+    final yPlane = image.planes[0];
+    final uPlane = image.planes[1];
+    final vPlane = image.planes[2];
+
+    final nv21 = Uint8List(width * height + (width * height ~/ 2));
+
+    // Copy Y plane.
+    int yIndex = 0;
+    for (int row = 0; row < height; row++) {
+      final int rowStart = row * yPlane.bytesPerRow;
+      final int rowEnd = rowStart + width;
+      if (rowEnd > yPlane.bytes.length) {
+        break;
+      }
+      nv21.setRange(yIndex, yIndex + width, yPlane.bytes, rowStart);
+      yIndex += width;
+    }
+
+    // Interleave V and U for NV21.
+    int uvIndex = width * height;
+    final int uvRowStride = uPlane.bytesPerRow;
+    final int uvPixelStride = uPlane.bytesPerPixel ?? 1;
+    for (int row = 0; row < height ~/ 2; row++) {
+      final int uvRowStart = row * uvRowStride;
+      for (int col = 0; col < width ~/ 2; col++) {
+        final int uvOffset = uvRowStart + col * uvPixelStride;
+        if (uvOffset >= uPlane.bytes.length || uvOffset >= vPlane.bytes.length) {
+          continue;
+        }
+        nv21[uvIndex++] = vPlane.bytes[uvOffset];
+        nv21[uvIndex++] = uPlane.bytes[uvOffset];
+      }
+    }
+
+    return nv21;
   }
 
   InputImageRotation _rotationForImage(
@@ -616,11 +759,11 @@ class _HomeScreenState extends State<HomeScreen>
     return merged.join('\n').trim();
   }
 
-  void _maybeEmitText(String text) {
+  void _handleOcrResult(String text, CameraImage image) {
     final cleaned = text.trim();
     if (cleaned.isEmpty) return;
     final normalized = _normalizeText(cleaned);
-    if (normalized.length < 3) return;
+    if (normalized.isEmpty) return;
 
     final now = DateTime.now();
     if (normalized == _lastEmittedText && now.difference(_lastEmitTime) < _emitCooldown) {
@@ -637,17 +780,253 @@ class _HomeScreenState extends State<HomeScreen>
     _lastEmittedText = normalized;
     _lastEmitTime = now;
     if (mounted) {
-      setState(() => _latestOcrText = cleaned);
+      setState(() {
+        _latestOcrText = cleaned;
+        _latestSmartText = '';
+        _latestSmartEmpty = false;
+        _latestGeminiError = null;
+      });
     }
     debugPrint('OCR: $cleaned');
-    if (_soundEnabled) {
-      unawaited(
-        _voiceAssistant.onSignboardDetected(
-          cleaned,
-          onUserResponse: _handleUserResponse,
-        ),
-      );
+    unawaited(_maybeSendToGemini(cleaned, image));
+  }
+
+  Future<void> _maybeSendToGemini(String text, CameraImage image) async {
+    if (_geminiInFlight) return;
+    if (!_geminiService.hasApiKey) {
+      debugPrint('GEMINI_API_KEY not set. Skipping Gemini.');
+      if (mounted) {
+        setState(() {
+          _latestGeminiError =
+              'Gemini API key missing. Run with --dart-define=GEMINI_API_KEY=YOUR_KEY';
+          _latestSmartText = '';
+          _latestSmartEmpty = false;
+        });
+      }
+      return;
     }
+    final now = DateTime.now();
+    if (now.difference(_lastGeminiCall) < _geminiCooldown) return;
+
+    final filteredText = _filterOcrText(text);
+    if (filteredText.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _latestSmartText = '';
+          _latestSmartEmpty = true;
+          _latestGeminiError = null;
+        });
+      }
+      return;
+    }
+    final filteredNormalized = _normalizeText(filteredText);
+    if (_lastGeminiText.isNotEmpty &&
+        _jaccardSimilarity(filteredNormalized, _lastGeminiText) >= 0.9) {
+      return;
+    }
+
+    final jpegBytes = _buildGeminiImage(image);
+    if (jpegBytes == null) {
+      if (mounted) {
+        setState(() {
+          _latestGeminiError = 'Unable to prepare camera image for Gemini.';
+          _latestSmartText = '';
+          _latestSmartEmpty = false;
+        });
+      }
+      return;
+    }
+
+    _geminiInFlight = true;
+    _lastGeminiCall = now;
+    _lastGeminiText = filteredNormalized;
+
+    try {
+      final result = await _geminiService.analyze(
+        ocrText: filteredText,
+        jpegBytes: jpegBytes,
+      );
+      if (result == null) {
+        if (mounted) {
+          setState(() {
+            _latestGeminiError = 'No response from Gemini.';
+            _latestSmartText = '';
+            _latestSmartEmpty = false;
+          });
+        }
+        return;
+      }
+      if (result.action != null) {
+        debugPrint('Gemini action: ${result.action!.type} -> ${result.action!.value}');
+      }
+      final speak = result.speak.trim();
+      if (mounted) {
+        setState(() {
+          _latestSmartText = speak;
+          _latestSmartEmpty = speak.isEmpty;
+          _latestGeminiError = null;
+        });
+      }
+      if (speak.isEmpty) return;
+      debugPrint('Gemini speak: $speak');
+      if (_soundEnabled) {
+        await _speakGeminiText(speak);
+      }
+    } catch (error) {
+      debugPrint('Gemini error: $error');
+      if (mounted) {
+        setState(() {
+          _latestGeminiError = 'Gemini error: ${error.toString()}';
+          _latestSmartText = '';
+          _latestSmartEmpty = false;
+        });
+      }
+    } finally {
+      _geminiInFlight = false;
+    }
+  }
+
+  Uint8List? _buildGeminiImage(CameraImage image) {
+    if (Platform.isIOS && image.format.group == ImageFormatGroup.bgra8888) {
+      return _buildJpegFromBgra(image);
+    }
+    if (Platform.isAndroid) {
+      return _buildJpegFromYuv420(image);
+    }
+    return null;
+  }
+
+  Uint8List? _buildJpegFromBgra(CameraImage image) {
+    if (image.planes.isEmpty) return null;
+    final plane = image.planes.first;
+    final bytes = plane.bytes;
+    final width = image.width;
+    final height = image.height;
+    const downscale = 2;
+    final outputWidth = (width / downscale).floor();
+    final outputHeight = (height / downscale).floor();
+    final img.Image rgbImage = img.Image(width: outputWidth, height: outputHeight);
+    final int rowStride = plane.bytesPerRow;
+
+    for (int y = 0, oy = 0; y < height; y += downscale, oy++) {
+      final int rowStart = y * rowStride;
+      for (int x = 0, ox = 0; x < width; x += downscale, ox++) {
+        final int index = rowStart + (x * 4);
+        if (index + 3 >= bytes.length) continue;
+        final int b = bytes[index];
+        final int g = bytes[index + 1];
+        final int r = bytes[index + 2];
+        final int a = bytes[index + 3];
+        rgbImage.setPixelRgba(ox, oy, r, g, b, a);
+      }
+    }
+    return Uint8List.fromList(img.encodeJpg(rgbImage, quality: 75));
+  }
+
+  Uint8List? _buildJpegFromYuv420(CameraImage image) {
+    if (image.planes.length < 3) return null;
+    final width = image.width;
+    final height = image.height;
+    const downscale = 2;
+    final outputWidth = (width / downscale).floor();
+    final outputHeight = (height / downscale).floor();
+    final img.Image rgbImage = img.Image(width: outputWidth, height: outputHeight);
+
+    final yPlane = image.planes[0];
+    final uPlane = image.planes[1];
+    final vPlane = image.planes[2];
+    final int yRowStride = yPlane.bytesPerRow;
+    final int uvRowStride = uPlane.bytesPerRow;
+    final int uvPixelStride = uPlane.bytesPerPixel ?? 1;
+
+    for (int y = 0, oy = 0; y < height; y += downscale, oy++) {
+      final int yRow = yRowStride * y;
+      final int uvRow = uvRowStride * (y >> 1);
+      for (int x = 0, ox = 0; x < width; x += downscale, ox++) {
+        final int yIndex = yRow + x;
+        final int uvIndex = uvRow + (x >> 1) * uvPixelStride;
+
+        final int yValue = yPlane.bytes[yIndex];
+        final int uValue = uPlane.bytes[uvIndex];
+        final int vValue = vPlane.bytes[uvIndex];
+
+        final int r = (yValue + 1.370705 * (vValue - 128)).round().clamp(0, 255);
+        final int g = (yValue - 0.337633 * (uValue - 128) - 0.698001 * (vValue - 128))
+            .round()
+            .clamp(0, 255);
+        final int b = (yValue + 1.732446 * (uValue - 128)).round().clamp(0, 255);
+
+        rgbImage.setPixelRgba(ox, oy, r, g, b, 255);
+      }
+    }
+
+    return Uint8List.fromList(img.encodeJpg(rgbImage, quality: 70));
+  }
+
+  Future<void> _speakGeminiText(String text) async {
+    final normalized = _normalizeText(text);
+    final now = DateTime.now();
+    if (normalized == _lastSpokenText &&
+        now.difference(_lastSpokenTime) < _speechCooldown) {
+      return;
+    }
+    _lastSpokenText = normalized;
+    _lastSpokenTime = now;
+    await _voiceAssistant.speak(text);
+  }
+
+  String _filterOcrText(String text) {
+    final lines = text.split('\n');
+    final filtered = <String>[];
+    final seen = <String>{};
+    for (final line in lines) {
+      final trimmed = line.trim();
+      if (trimmed.length < 2) continue;
+      if (_isNoiseLine(trimmed)) continue;
+      final normalized = _normalizeText(trimmed);
+      if (normalized.isEmpty) continue;
+      if (!seen.add(normalized)) continue;
+      filtered.add(trimmed);
+      if (filtered.length >= 12) break;
+    }
+    return filtered.join('\n');
+  }
+
+  bool _isNoiseLine(String line) {
+    final lower = line.toLowerCase();
+    const noisyTokens = [
+      'http',
+      'www',
+      '.com',
+      '.in',
+      '.org',
+      '.net',
+      'bing',
+      'google',
+      'search',
+      'images',
+      'image',
+      'gmail',
+      'youtube',
+      'whatsapp',
+      'instagram',
+      'facebook',
+      'twitter',
+      'chrome',
+      'edge',
+      'browser',
+      'tab',
+      'play store',
+      'app store',
+    ];
+    for (final token in noisyTokens) {
+      if (lower.contains(token)) return true;
+    }
+    final alphaCount = RegExp(r'[a-zA-Z]').allMatches(line).length;
+    if (line.length > 0 && (alphaCount / line.length) < 0.3) {
+      return true;
+    }
+    return false;
   }
 
   TextRecognitionScript _scriptByName(String name) {
@@ -663,6 +1042,11 @@ class _HomeScreenState extends State<HomeScreen>
     return text.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
   }
 
+  String _truncateText(String text, {int maxChars = 160}) {
+    if (text.length <= maxChars) return text;
+    return '${text.substring(0, maxChars).trimRight()}...';
+  }
+
   double _jaccardSimilarity(String a, String b) {
     final aTokens = a.split(' ').where((token) => token.isNotEmpty).toSet();
     final bTokens = b.split(' ').where((token) => token.isNotEmpty).toSet();
@@ -672,28 +1056,7 @@ class _HomeScreenState extends State<HomeScreen>
     return union == 0 ? 0 : intersection / union;
   }
 
-  Future<void> _handleUserResponse(String text) async {
-    if (!_soundEnabled) return;
-    final normalized = text.toLowerCase();
-    if (normalized.contains('yes') ||
-        normalized.contains('haan') ||
-        normalized.contains('help') ||
-        normalized.contains('haanji')) {
-      await _voiceAssistant.speak(
-        'Okay. Tell me what you need, and I will help you.',
-      );
-      return;
-    }
-    if (normalized.contains('no') || normalized.contains('nah') || normalized.contains('nahi')) {
-      await _voiceAssistant.speak(
-        'Alright. I am here if you need anything else.',
-      );
-      return;
-    }
-    await _voiceAssistant.speak(
-      'Thanks. I heard: $text. I will try to assist.',
-    );
-  }
+  // Voice response handling reserved for future 2-way conversations.
 
   void _showSettingsBottomSheet() {
     showModalBottomSheet(
@@ -732,14 +1095,18 @@ class _HomeScreenState extends State<HomeScreen>
                   const SizedBox(height: 8),
                   DropdownButtonFormField<String>(
                     value: _selectedLanguage,
-                    items: ['English', 'Hindi'].map((lang) {
+                    items: ['English', 'Hindi', 'Tamil'].map((lang) {
                       return DropdownMenuItem(value: lang, child: Text(lang, style: const TextStyle(fontSize: 18)));
                     }).toList(),
                     onChanged: (val) {
                       if (val == null) return;
                       setModalState(() => _selectedLanguage = val);
                       setState(() => _selectedLanguage = val);
-                      final localeId = _selectedLanguage == 'Hindi' ? 'hi_IN' : 'en_IN';
+                      final localeId = _selectedLanguage == 'Hindi'
+                          ? 'hi_IN'
+                          : _selectedLanguage == 'Tamil'
+                              ? 'ta_IN'
+                              : 'en_IN';
                       unawaited(_voiceAssistant.setLocale(localeId));
                     },
                   ),

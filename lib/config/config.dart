@@ -9,7 +9,7 @@
 
 /// Your Gemini 1.5 Flash API key.
 /// Leave as-is until Phase 4 — the app will not call Gemini before that phase.
-const String GEMINI_API_KEY = 'YOUR_GEMINI_API_KEY_HERE';
+const String GEMINI_API_KEY = 'AIzaSyC-dpF3ioARhZqTOYTnAAM2b2pmXASs7YI';
 
 /// Gemini REST endpoint
 const String GEMINI_ENDPOINT =

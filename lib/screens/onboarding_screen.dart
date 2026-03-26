@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 
 /// Onboarding splash screen shown on app install.
 /// Routes to the main Camera tab via "Start now".
@@ -21,11 +24,39 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   // SOS State
   String _contactName = '';
   String _contactPhone = '';
+  late final FlutterTts _tts;
 
   @override
   void initState() {
     super.initState();
+    _tts = FlutterTts();
+    _configureTts();
     _loadPreferences();
+  }
+
+  Future<void> _configureTts() async {
+    try {
+      await _tts.setEngine('com.google.android.tts');
+    } catch (_) {}
+    try {
+      await _tts.awaitSpeakCompletion(true);
+    } catch (_) {}
+    await _tts.setLanguage('en-IN');
+    await _tts.setSpeechRate(0.5);
+    await _tts.setPitch(1.0);
+  }
+
+  Future<void> _speakWelcome() async {
+    try {
+      await _tts.stop();
+      await _tts.speak('Welcome to DrishtiAI');
+    } catch (_) {}
+  }
+
+  @override
+  void dispose() {
+    unawaited(_tts.stop());
+    super.dispose();
   }
 
   Future<void> _loadPreferences() async {
@@ -350,6 +381,9 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                       margin: const EdgeInsets.symmetric(horizontal: 40),
                       child: ElevatedButton(
                         onPressed: () {
+                          if (_soundEnabled) {
+                            unawaited(_speakWelcome());
+                          }
                           // Navigate to the main shell (Camera screen default)
                           context.go('/home');
                         },

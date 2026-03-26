@@ -9,8 +9,10 @@ class VoiceAssistantService {
   VoiceAssistantService({
     FlutterTts? tts,
     stt.SpeechToText? speechToText,
+    bool enableSpeech = true,
   })  : _tts = tts ?? FlutterTts(),
-        _speech = speechToText ?? stt.SpeechToText();
+        _speech = speechToText ?? stt.SpeechToText(),
+        _speechEnabled = enableSpeech;
 
   final FlutterTts _tts;
   final stt.SpeechToText _speech;
@@ -24,6 +26,7 @@ class VoiceAssistantService {
   bool _speechAvailable = false;
   String _localeId = 'en_IN';
   String _ttsLanguage = 'en-IN';
+  final bool _speechEnabled;
 
   Future<void> Function(String text)? _pendingUserResponse;
   Completer<void>? _listenCompleter;
@@ -34,10 +37,14 @@ class VoiceAssistantService {
     _localeId = localeId;
     _ttsLanguage = _languageForTts(localeId);
     await _configureTts();
-    _speechAvailable = await _speech.initialize(
-      onError: _handleSpeechError,
-      onStatus: _handleSpeechStatus,
-    );
+    if (_speechEnabled) {
+      _speechAvailable = await _speech.initialize(
+        onError: _handleSpeechError,
+        onStatus: _handleSpeechStatus,
+      );
+    } else {
+      _speechAvailable = false;
+    }
     _initialized = true;
   }
 
@@ -106,6 +113,11 @@ class VoiceAssistantService {
     } catch (_) {
       // Best-effort: if Google engine isn't available, keep default.
     }
+    try {
+      await _tts.awaitSpeakCompletion(true);
+    } catch (_) {
+      // Some platforms do not support awaitSpeakCompletion.
+    }
     await _tts.setLanguage(_ttsLanguage);
     await _tts.setSpeechRate(0.5);
     await _tts.setPitch(1.0);
@@ -128,6 +140,11 @@ class VoiceAssistantService {
   }
 
   Future<void> _startListening(Future<void> Function(String text) onUserResponse) async {
+    if (!_speechEnabled) {
+      lastError.value = 'Speech recognition is disabled.';
+      _isBusy = false;
+      return;
+    }
     final hasMicPermission = await _ensureMicrophonePermission();
     if (!hasMicPermission) {
       _isBusy = false;
