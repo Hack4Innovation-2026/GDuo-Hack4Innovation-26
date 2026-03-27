@@ -20,6 +20,7 @@ class VoiceAssistantService {
   final ValueNotifier<bool> isListening = ValueNotifier<bool>(false);
   final ValueNotifier<String> liveTranscript = ValueNotifier<String>('');
   final ValueNotifier<String?> lastError = ValueNotifier<String?>(null);
+  final ValueNotifier<bool> isSpeaking = ValueNotifier<bool>(false);
 
   bool _initialized = false;
   bool _isBusy = false;
@@ -52,6 +53,7 @@ class VoiceAssistantService {
     isListening.dispose();
     liveTranscript.dispose();
     lastError.dispose();
+    isSpeaking.dispose();
     await _speech.stop();
     await _speech.cancel();
     await _tts.stop();
@@ -64,6 +66,7 @@ class VoiceAssistantService {
     _isBusy = false;
     isListening.value = false;
     liveTranscript.value = '';
+    isSpeaking.value = false;
     await _speech.stop();
     await _speech.cancel();
     await _tts.stop();
@@ -121,15 +124,20 @@ class VoiceAssistantService {
     await _tts.setLanguage(_ttsLanguage);
     await _tts.setSpeechRate(0.5);
     await _tts.setPitch(1.0);
+    _tts.setStartHandler(() {
+      isSpeaking.value = true;
+    });
     _tts.setCompletionHandler(_handleTtsComplete);
     _tts.setErrorHandler((message) {
       lastError.value = 'TTS error: $message';
       _pendingUserResponse = null;
       _isBusy = false;
+      isSpeaking.value = false;
     });
   }
 
   void _handleTtsComplete() {
+    isSpeaking.value = false;
     final pendingResponse = _pendingUserResponse;
     if (pendingResponse == null) {
       _isBusy = false;

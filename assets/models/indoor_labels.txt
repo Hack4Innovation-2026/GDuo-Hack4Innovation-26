@@ -1,10 +1,10 @@
 door
-openedDoor
 cabinetDoor
 refrigeratorDoor
 window
 chair
 table
 cabinet
-sofa/couch
+couch
+openedDoor
 pole

@@ -72,10 +72,14 @@ class _HomeScreenState extends State<HomeScreen>
   String _lastGeminiText = '';
   bool _geminiInFlight = false;
   bool _latestSmartEmpty = false;
+  Size? _lastFrameSize;
+  DateTime _lastAlertSpokenAt = DateTime.fromMillisecondsSinceEpoch(0);
+  String _lastAlertKey = '';
 
   static const Duration _analysisInterval = Duration(milliseconds: 500);
   static const Duration _emitCooldown = Duration(milliseconds: 1500);
   static const Duration _speechCooldown = Duration(seconds: 4);
+  static const Duration _alertSpeakCooldown = Duration(seconds: 4);
   static const Duration _geminiCooldown = Duration(seconds: 6);
   static const Duration _yoloInterval = Duration(milliseconds: 900);
   static const int _yoloFrameStride = 4;
@@ -91,10 +95,22 @@ class _HomeScreenState extends State<HomeScreen>
     'bicycle',
     'person',
     'pothole',
+    'speedbump',
+    'bump',
+    'barricade',
+    'barrier',
+    'construction',
+    'cone',
     'pole',
+    'electricpole',
+    'powerpole',
+    'streetlight',
     'stair',
     'stairs',
     'road',
+    'rickshaw',
+    'autorickshaw',
+    'scooter',
   };
 
   static const Set<String> _indoorAlertLabels = {
@@ -106,6 +122,46 @@ class _HomeScreenState extends State<HomeScreen>
     'pole',
     'stair',
     'stairs',
+  };
+
+  static const Map<String, String> _alertSpokenLabels = {
+    'openeddoor': 'open door',
+    'cabinetdoor': 'cabinet door',
+    'refrigeratordoor': 'refrigerator door',
+    'electricpole': 'electric pole',
+    'powerpole': 'electric pole',
+    'streetlight': 'street light',
+    'autorickshaw': 'auto rickshaw',
+    'rickshaw': 'rickshaw',
+    'speedbump': 'speed bump',
+  };
+
+  static const Map<String, String> _alertGuidance = {
+    'car': 'Keep left.',
+    'truck': 'Keep left.',
+    'bus': 'Keep left.',
+    'motorcycle': 'Keep left.',
+    'bicycle': 'Keep left.',
+    'autorickshaw': 'Keep left.',
+    'rickshaw': 'Keep left.',
+    'scooter': 'Keep left.',
+    'pothole': 'Watch your step.',
+    'speedbump': 'Slow down.',
+    'bump': 'Slow down.',
+    'barricade': 'Change lane carefully.',
+    'barrier': 'Change lane carefully.',
+    'construction': 'Change lane carefully.',
+    'cone': 'Change lane carefully.',
+    'stair': 'Step carefully.',
+    'stairs': 'Step carefully.',
+    'door': 'Mind the doorway.',
+    'openeddoor': 'Mind the doorway.',
+    'cabinetdoor': 'Mind the doorway.',
+    'refrigeratordoor': 'Mind the doorway.',
+    'pole': 'Obstacle ahead.',
+    'electricpole': 'Obstacle ahead.',
+    'powerpole': 'Obstacle ahead.',
+    'streetlight': 'Obstacle ahead.',
   };
 
   static const Map<DeviceOrientation, int> _deviceRotation = {
@@ -123,7 +179,7 @@ class _HomeScreenState extends State<HomeScreen>
     _devanagariTextRecognizer = TextRecognizer(script: _scriptByName('devanagari'));
     _tamilTextRecognizer = TextRecognizer(script: _scriptByName('tamil'));
 
-    _voiceAssistant = VoiceAssistantService(enableSpeech: false);
+    _voiceAssistant = VoiceAssistantService(enableSpeech: true);
     _geminiService = GeminiService();
     unawaited(_voiceAssistant.initialize(localeId: 'en_IN'));
     _yoloDetector = YoloDetectorService(
@@ -849,7 +905,7 @@ class _HomeScreenState extends State<HomeScreen>
   ) {
     if (detections.isEmpty) return const [];
     final alerts = detections.where((d) {
-      final normalized = d.label.trim().toLowerCase();
+      final normalized = _normalizeLabelForAlert(d.label);
       if (!allowedLabels.contains(normalized)) return false;
       if (d.distanceMeters != null) {
         return d.distanceMeters! <= 10.0;
@@ -867,6 +923,139 @@ class _HomeScreenState extends State<HomeScreen>
       return b.score.compareTo(a.score);
     });
     return alerts;
+  }
+
+  String _normalizeLabelForAlert(String label) {
+    final lowered = label.trim().toLowerCase();
+    return lowered.replaceAll(RegExp(r'[^a-z0-9]+'), '');
+  }
+
+  int _urgencyRank(YoloDetection detection) {
+    final distance = detection.distanceMeters;
+    if (distance != null) {
+      if (distance <= 3.0) return 0;
+      if (distance <= 6.0) return 1;
+      if (distance <= 10.0) return 2;
+      return 3;
+    }
+    switch (detection.proximity) {
+      case 'urgent':
+        return 0;
+      case 'near':
+        return 1;
+      case 'mid':
+        return 2;
+      default:
+        return 3;
+    }
+  }
+
+  YoloDetection? _pickMostUrgentAlert(
+    List<YoloDetection> roadAlerts,
+    List<YoloDetection> indoorAlerts,
+  ) {
+    final combined = <YoloDetection>[
+      ...roadAlerts,
+      ...indoorAlerts,
+    ];
+    if (combined.isEmpty) return null;
+    combined.sort((a, b) {
+      final rankDiff = _urgencyRank(a).compareTo(_urgencyRank(b));
+      if (rankDiff != 0) return rankDiff;
+      final da = a.distanceMeters;
+      final db = b.distanceMeters;
+      if (da != null && db != null && da != db) {
+        return da.compareTo(db);
+      }
+      return b.score.compareTo(a.score);
+    });
+    return combined.first;
+  }
+
+  String _directionForRect(Rect rect) {
+    final frame = _lastFrameSize;
+    if (frame == null || frame.width <= 0) return 'ahead';
+    final centerX = rect.center.dx / frame.width;
+    if (centerX < 0.35) return 'left';
+    if (centerX > 0.65) return 'right';
+    return 'ahead';
+  }
+
+  String _distanceDescriptor(YoloDetection detection) {
+    final distance = detection.distanceMeters;
+    if (distance != null) {
+      if (distance <= 3.0) return 'very close';
+      if (distance <= 6.0) return 'nearby';
+      if (distance <= 10.0) return 'ahead';
+      return 'far';
+    }
+    switch (detection.proximity) {
+      case 'urgent':
+        return 'very close';
+      case 'near':
+        return 'nearby';
+      case 'mid':
+        return 'ahead';
+      default:
+        return 'far';
+    }
+  }
+
+  String _humanizeLabel(String label) {
+    final withSpaces = label
+        .replaceAll(RegExp(r'[_/]+'), ' ')
+        .replaceAllMapped(RegExp(r'([a-z])([A-Z])'), (m) => '${m[1]} ${m[2]}');
+    return withSpaces.trim().toLowerCase();
+  }
+
+  String _capitalize(String text) {
+    if (text.isEmpty) return text;
+    return text[0].toUpperCase() + text.substring(1);
+  }
+
+  String _buildAlertMessage(YoloDetection detection) {
+    final normalized = _normalizeLabelForAlert(detection.label);
+    final spokenLabel = _alertSpokenLabels[normalized] ?? _humanizeLabel(detection.label);
+    final direction = _directionForRect(detection.rect);
+    var distanceWord = _distanceDescriptor(detection);
+    if (direction != 'ahead' && distanceWord == 'ahead') {
+      distanceWord = 'nearby';
+    }
+    final directionPhrase = direction == 'ahead' ? 'ahead' : 'on your $direction';
+    final guidance = _alertGuidance[normalized];
+    final base = '${_capitalize(spokenLabel)} $distanceWord $directionPhrase.';
+    if (guidance == null) return base;
+    return '$base $guidance';
+  }
+
+  String _alertKey(YoloDetection detection) {
+    final normalized = _normalizeLabelForAlert(detection.label);
+    final direction = _directionForRect(detection.rect);
+    return '$normalized:${detection.proximity}:$direction';
+  }
+
+  Future<void> _maybeSpeakAlerts() async {
+    if (!_soundEnabled) return;
+    if (_voiceAssistant.isListening.value || _voiceAssistant.isSpeaking.value) return;
+    final now = DateTime.now();
+    if (now.difference(_lastAlertSpokenAt) < _alertSpeakCooldown) return;
+
+    final roadAlerts = _filterAlertDetections(_latestDetections, _roadAlertLabels);
+    final indoorAlerts = _filterAlertDetections(_latestIndoorDetections, _indoorAlertLabels);
+    final candidate = _pickMostUrgentAlert(roadAlerts, indoorAlerts);
+    if (candidate == null) return;
+
+    final message = _buildAlertMessage(candidate);
+    if (message.trim().isEmpty) return;
+
+    final key = _alertKey(candidate);
+    if (key == _lastAlertKey && now.difference(_lastAlertSpokenAt) < const Duration(seconds: 8)) {
+      return;
+    }
+
+    _lastAlertKey = key;
+    _lastAlertSpokenAt = now;
+    await _voiceAssistant.speak(message);
   }
 
   Future<void> _disposeController(CameraController controller) async {
@@ -887,6 +1076,7 @@ class _HomeScreenState extends State<HomeScreen>
     if (now.difference(_lastAnalysisTime) < _analysisInterval) return;
     _isProcessingFrame = true;
     _lastAnalysisTime = now;
+    _lastFrameSize = Size(image.width.toDouble(), image.height.toDouble());
     _frameIndex++;
     try {
       final inputImage = _inputImageFromCameraImage(image);
@@ -915,6 +1105,7 @@ class _HomeScreenState extends State<HomeScreen>
         _indoorInFlight = true;
         _lastIndoorTime = now;
       }
+      bool shouldSpeakAlerts = false;
       if (shouldRunRoad || shouldRunIndoor) {
         final rgbImage = _buildRgbImageForYolo(image);
         if (rgbImage != null) {
@@ -925,6 +1116,7 @@ class _HomeScreenState extends State<HomeScreen>
                 _latestDetections = detections;
               });
             }
+            shouldSpeakAlerts = true;
           }
           if (shouldRunIndoor) {
             final detections = await _indoorDetector.detect(
@@ -936,6 +1128,7 @@ class _HomeScreenState extends State<HomeScreen>
                 _latestIndoorDetections = detections;
               });
             }
+            shouldSpeakAlerts = true;
           }
         }
         if (shouldRunRoad) {
@@ -943,6 +1136,9 @@ class _HomeScreenState extends State<HomeScreen>
         }
         if (shouldRunIndoor) {
           _indoorInFlight = false;
+        }
+        if (shouldSpeakAlerts) {
+          unawaited(_maybeSpeakAlerts());
         }
       }
     } catch (error) {
