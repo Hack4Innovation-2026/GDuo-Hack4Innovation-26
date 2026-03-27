@@ -42,6 +42,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       await _tts.awaitSpeakCompletion(true);
     } catch (_) {}
     await _tts.setLanguage('en-IN');
+    await _tts.setVolume(1.0);
     await _tts.setSpeechRate(0.5);
     await _tts.setPitch(1.0);
   }

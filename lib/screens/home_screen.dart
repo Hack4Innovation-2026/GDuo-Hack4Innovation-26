@@ -51,6 +51,12 @@ class _HomeScreenState extends State<HomeScreen>
   String _latestOcrText = '';
   String _latestSmartText = '';
   String? _latestGeminiError;
+  final Map<String, _OcrLine> _ocrLineBuffer = {};
+  String _stableOcrCandidate = '';
+  DateTime _stableOcrSince = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastGuidanceTime = DateTime.fromMillisecondsSinceEpoch(0);
+  String _lastGuidanceText = '';
+  bool _holdAnnounced = false;
   DateTime _lastSpokenTime = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastSpokenText = '';
   DateTime _lastGeminiCall = DateTime.fromMillisecondsSinceEpoch(0);
@@ -62,6 +68,12 @@ class _HomeScreenState extends State<HomeScreen>
   static const Duration _emitCooldown = Duration(milliseconds: 1500);
   static const Duration _speechCooldown = Duration(seconds: 4);
   static const Duration _geminiCooldown = Duration(seconds: 6);
+  static const Duration _ocrRetention = Duration(seconds: 3);
+  static const Duration _stableHoldDuration = Duration(seconds: 2);
+  static const int _minStableLines = 3;
+  static const int _minStableChars = 25;
+  static const double _minConfidence = 0.58;
+  static const Duration _guidanceCooldown = Duration(seconds: 2);
 
   static const Map<DeviceOrientation, int> _deviceRotation = {
     DeviceOrientation.portraitUp: 0,
@@ -490,7 +502,7 @@ class _HomeScreenState extends State<HomeScreen>
       );
       final controller = CameraController(
         selectedCamera,
-        ResolutionPreset.medium,
+        ResolutionPreset.high,
         enableAudio: false,
         imageFormatGroup: Platform.isIOS ? ImageFormatGroup.bgra8888 : ImageFormatGroup.yuv420,
       );
@@ -524,6 +536,13 @@ class _HomeScreenState extends State<HomeScreen>
         _cameraController = null;
         _cameraReady = false;
         _isStreaming = false;
+        _latestOcrText = '';
+        _latestSmartText = '';
+        _latestSmartEmpty = false;
+        _latestGeminiError = null;
+        _ocrLineBuffer.clear();
+        _stableOcrCandidate = '';
+        _stableOcrSince = DateTime.fromMillisecondsSinceEpoch(0);
       });
       WidgetsBinding.instance.addPostFrameCallback((_) {
         unawaited(_disposeController(controller));
@@ -536,6 +555,16 @@ class _HomeScreenState extends State<HomeScreen>
     unawaited(_disposeController(controller));
   }
 
+  Rect? _mergeBoundingBoxes(List<RecognizedText> results) {
+    Rect? merged;
+    for (final result in results) {
+      for (final block in result.blocks) {
+        final box = block.boundingBox;
+        merged = merged == null ? box : merged!.expandToInclude(box);
+      }
+    }
+    return merged;
+  }
   Widget _buildSmartOverlay() {
     final hasError = _latestGeminiError != null && _latestGeminiError!.isNotEmpty;
     final hasSmart = _latestSmartText.isNotEmpty;
@@ -638,7 +667,8 @@ class _HomeScreenState extends State<HomeScreen>
         _tamilTextRecognizer.processImage(inputImage),
       ]);
       final mergedText = _mergeRecognizedText(results);
-      _handleOcrResult(mergedText, image);
+      final mergedRect = _mergeBoundingBoxes(results);
+      _handleOcrResult(mergedText, image, mergedRect);
     } catch (error) {
       debugPrint('OCR error: $error');
     } finally {
@@ -759,13 +789,41 @@ class _HomeScreenState extends State<HomeScreen>
     return merged.join('\n').trim();
   }
 
-  void _handleOcrResult(String text, CameraImage image) {
+  void _handleOcrResult(String text, CameraImage image, Rect? mergedRect) {
     final cleaned = text.trim();
     if (cleaned.isEmpty) return;
-    final normalized = _normalizeText(cleaned);
+    final now = DateTime.now();
+    final currentLines = _extractUsefulLines(cleaned);
+    if (currentLines.isEmpty) return;
+
+    _updateOcrBuffer(currentLines, now);
+    final stableText = _buildStableOcrText(currentLines, now);
+    if (stableText.isEmpty) return;
+
+    final normalized = _normalizeText(stableText);
     if (normalized.isEmpty) return;
 
-    final now = DateTime.now();
+    final lineCount = stableText.split('\n').where((line) => line.trim().isNotEmpty).length;
+    final hasEnough = lineCount >= _minStableLines || stableText.length >= _minStableChars;
+
+    if (stableText != _stableOcrCandidate) {
+      _stableOcrCandidate = stableText;
+      _stableOcrSince = now;
+      _holdAnnounced = false;
+    }
+
+    final isStable = now.difference(_stableOcrSince) >= _stableHoldDuration;
+
+    if (mounted) {
+      setState(() {
+        _latestOcrText = stableText;
+      });
+    }
+
+    if (!hasEnough || !isStable) {
+      return;
+    }
+
     if (normalized == _lastEmittedText && now.difference(_lastEmitTime) < _emitCooldown) {
       return;
     }
@@ -781,14 +839,13 @@ class _HomeScreenState extends State<HomeScreen>
     _lastEmitTime = now;
     if (mounted) {
       setState(() {
-        _latestOcrText = cleaned;
         _latestSmartText = '';
         _latestSmartEmpty = false;
         _latestGeminiError = null;
       });
     }
-    debugPrint('OCR: $cleaned');
-    unawaited(_maybeSendToGemini(cleaned, image));
+    debugPrint('OCR: $stableText');
+    unawaited(_maybeSendToGemini(stableText, image));
   }
 
   Future<void> _maybeSendToGemini(String text, CameraImage image) async {
@@ -845,6 +902,7 @@ class _HomeScreenState extends State<HomeScreen>
       final result = await _geminiService.analyze(
         ocrText: filteredText,
         jpegBytes: jpegBytes,
+        preferredLanguage: _preferredLanguageLabel(),
       );
       if (result == null) {
         if (mounted) {
@@ -869,9 +927,15 @@ class _HomeScreenState extends State<HomeScreen>
       }
       if (speak.isEmpty) return;
       debugPrint('Gemini speak: $speak');
-      if (_soundEnabled) {
-        await _speakGeminiText(speak);
+      if (!_soundEnabled) {
+        if (mounted) {
+          setState(() {
+            _latestGeminiError = 'Audio Feedback is OFF. Enable it in Settings.';
+          });
+        }
+        return;
       }
+      await _speakGeminiText(speak);
     } catch (error) {
       debugPrint('Gemini error: $error');
       if (mounted) {
@@ -972,10 +1036,23 @@ class _HomeScreenState extends State<HomeScreen>
     }
     _lastSpokenText = normalized;
     _lastSpokenTime = now;
-    await _voiceAssistant.speak(text);
+    try {
+      await _voiceAssistant.speak(text);
+    } catch (error) {
+      debugPrint('TTS error: $error');
+      if (mounted) {
+        setState(() {
+          _latestGeminiError = 'TTS error: ${error.toString()}';
+        });
+      }
+    }
   }
 
   String _filterOcrText(String text) {
+    return _extractUsefulLines(text).join('\n');
+  }
+
+  List<String> _extractUsefulLines(String text) {
     final lines = text.split('\n');
     final filtered = <String>[];
     final seen = <String>{};
@@ -987,9 +1064,63 @@ class _HomeScreenState extends State<HomeScreen>
       if (normalized.isEmpty) continue;
       if (!seen.add(normalized)) continue;
       filtered.add(trimmed);
-      if (filtered.length >= 12) break;
+      if (filtered.length >= 30) break;
     }
-    return filtered.join('\n');
+    return filtered;
+  }
+
+  void _updateOcrBuffer(List<String> lines, DateTime now) {
+    for (final line in lines) {
+      final normalized = _normalizeText(line);
+      if (normalized.isEmpty) continue;
+      final existing = _ocrLineBuffer[normalized];
+      if (existing == null) {
+        _ocrLineBuffer[normalized] = _OcrLine(
+          text: line,
+          normalized: normalized,
+          lastSeen: now,
+          count: 1,
+        );
+      } else {
+        existing.lastSeen = now;
+        existing.count += 1;
+        if (line.length > existing.text.length) {
+          existing.text = line;
+        }
+      }
+    }
+
+    _ocrLineBuffer.removeWhere(
+      (_, entry) => now.difference(entry.lastSeen) > _ocrRetention,
+    );
+  }
+
+  String _buildStableOcrText(List<String> currentLines, DateTime now) {
+    if (currentLines.isEmpty) return '';
+
+    final ordered = <String>[];
+    final seen = <String>{};
+
+    for (final line in currentLines) {
+      final normalized = _normalizeText(line);
+      if (normalized.isEmpty || seen.contains(normalized)) continue;
+      ordered.add(line);
+      seen.add(normalized);
+    }
+
+    final extras = _ocrLineBuffer.values
+        .where((entry) => now.difference(entry.lastSeen) <= _ocrRetention && entry.count >= 2)
+        .toList()
+      ..sort((a, b) => a.firstSeen.compareTo(b.firstSeen));
+
+    for (final entry in extras) {
+      if (seen.add(entry.normalized)) {
+        ordered.add(entry.text);
+      }
+      if (ordered.length >= 20) break;
+    }
+
+    return ordered.join('\n').trim();
   }
 
   bool _isNoiseLine(String line) {
@@ -1023,7 +1154,8 @@ class _HomeScreenState extends State<HomeScreen>
       if (lower.contains(token)) return true;
     }
     final alphaCount = RegExp(r'[a-zA-Z]').allMatches(line).length;
-    if (line.length > 0 && (alphaCount / line.length) < 0.3) {
+    final digitCount = RegExp(r'\d').allMatches(line).length;
+    if (line.length > 0 && (alphaCount / line.length) < 0.3 && digitCount < 4) {
       return true;
     }
     return false;
@@ -1042,9 +1174,88 @@ class _HomeScreenState extends State<HomeScreen>
     return text.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
   }
 
+  String _preferredLanguageLabel() {
+    switch (_selectedLanguage) {
+      case 'Hindi':
+        return 'Hindi';
+      case 'Tamil':
+        return 'Tamil';
+      case 'Marathi':
+        return 'Marathi';
+      case 'English':
+        return 'English';
+      default:
+        return 'Auto';
+    }
+  }
+
   String _truncateText(String text, {int maxChars = 160}) {
     if (text.length <= maxChars) return text;
     return '${text.substring(0, maxChars).trimRight()}...';
+  }
+
+  double _estimateOcrConfidence(String text, int lineCount) {
+    final letters = RegExp(r'[A-Za-zऀ-ॿ஀-௿]').allMatches(text).length;
+    final digits = RegExp(r'\d').allMatches(text).length;
+    final chars = text.length;
+    if (chars == 0) return 0.0;
+    final letterRatio = letters / chars;
+    final digitBoost = digits >= 6 ? 0.08 : 0.0;
+    final lineBoost = lineCount >= 3 ? 0.08 : 0.0;
+    final lengthBoost = chars >= 40 ? 0.08 : 0.0;
+    final score = (letterRatio + digitBoost + lineBoost + lengthBoost).clamp(0.0, 1.0);
+    return score;
+  }
+
+  void _maybeProvideGuidance(Rect? rect, Size imageSize, bool readyToHold) {
+    if (!_soundEnabled) return;
+    if (rect == null) {
+      _holdAnnounced = false;
+      return;
+    }
+    if (_geminiInFlight || _latestSmartText.isNotEmpty) return;
+
+    final now = DateTime.now();
+    if (now.difference(_lastGuidanceTime) < _guidanceCooldown) return;
+
+    final widthRatio = rect.width / imageSize.width;
+    final heightRatio = rect.height / imageSize.height;
+    final dx = (rect.center.dx - imageSize.width / 2) / (imageSize.width / 2);
+    final dy = (rect.center.dy - imageSize.height / 2) / (imageSize.height / 2);
+
+    String? guidance;
+
+    if (widthRatio < 0.45 || heightRatio < 0.3) {
+      guidance = 'Move closer to fill the signboard.';
+    } else if (widthRatio > 0.95 || heightRatio > 0.95) {
+      guidance = 'Move a little back.';
+    } else if (dx > 0.18) {
+      guidance = 'Move left.';
+    } else if (dx < -0.18) {
+      guidance = 'Move right.';
+    } else if (dy > 0.18) {
+      guidance = 'Move down.';
+    } else if (dy < -0.18) {
+      guidance = 'Move up.';
+    } else if (readyToHold && !_holdAnnounced) {
+      guidance = 'Signboard detected. Hold still.';
+      _holdAnnounced = true;
+    }
+
+    if (guidance == null) return;
+    if (guidance == _lastGuidanceText) return;
+
+    _lastGuidanceText = guidance;
+    _lastGuidanceTime = now;
+    unawaited(_speakGuidance(guidance));
+  }
+
+  Future<void> _speakGuidance(String text) async {
+    try {
+      await _voiceAssistant.speak(text);
+    } catch (_) {
+      // Ignore guidance TTS errors
+    }
   }
 
   double _jaccardSimilarity(String a, String b) {
@@ -1148,4 +1359,29 @@ class _HomeScreenState extends State<HomeScreen>
       },
     );
   }
+
 }
+
+class _OcrLine {
+  _OcrLine({
+    required this.text,
+    required this.normalized,
+    required this.lastSeen,
+    required this.count,
+  }) : firstSeen = lastSeen;
+
+  String text;
+  final String normalized;
+  DateTime firstSeen;
+  DateTime lastSeen;
+  int count;
+}
+
+
+
+
+
+
+
+
+
