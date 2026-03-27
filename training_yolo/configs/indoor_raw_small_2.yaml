@@ -1,0 +1,16 @@
+path: /Users/manasighalsasi/Desktop/DrishtiAI/training_yolo/datasets/raw_small_2
+train: train/images
+val: valid/images
+test: test/images
+nc: 10
+names:
+  - door
+  - cabinetDoor
+  - refrigeratorDoor
+  - window
+  - chair
+  - table
+  - cabinet
+  - couch
+  - openedDoor
+  - pole
