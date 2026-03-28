@@ -2134,16 +2134,34 @@ class _HomeScreenState extends State<HomeScreen>
     try {
       final inputImage = _inputImageFromCameraImage(image);
       if (inputImage == null) return;
-      final results = await Future.wait([
-        _latinTextRecognizer.processImage(inputImage),
-        _devanagariTextRecognizer.processImage(inputImage),
-        _tamilTextRecognizer.processImage(inputImage),
-      ]);
+      final recognizers = _activeRecognizers();
+      if (recognizers.isEmpty) return;
+      final results = await Future.wait(
+        recognizers.map((recognizer) => recognizer.processImage(inputImage)),
+      );
       final ocrResults = results;
-      final mergedText = _mergeRecognizedText(results);
+      final mergedRect = _mergeBoundingBoxes(results);
+      final mergedText = _mergeRecognizedText(
+        results,
+        focusRect: mergedRect,
+        imageSize: _lastFrameSize,
+      );
       _updateOcrPreview(mergedText);
+      if (_pendingConversationQuestion != null && !_conversationInFlight) {
+        final question = _pendingConversationQuestion!;
+        _pendingConversationQuestion = null;
+        unawaited(_answerConversation(question, mergedText, image));
+      }
+      if (_intentModeEnabled &&
+          _activeIntentQuery != null &&
+          !_intentInFlight &&
+          !_conversationInFlight &&
+          _pendingConversationQuestion == null) {
+        final query = _activeIntentQuery!;
+        unawaited(_checkIntentMatch(query, mergedText, image, mergedRect));
+      }
       if (!_signboardReady) {
-        _handleOcrResult(mergedText, image);
+        _handleOcrResult(mergedText, image, mergedRect);
       }
 
       final bool shouldRunRoad = _yoloReady &&
@@ -2304,688 +2322,6 @@ class _HomeScreenState extends State<HomeScreen>
       }
     } catch (error) {
       debugPrint('Frame processing error: $error');
-    } finally {
-      _isProcessingFrame = false;
-    }
-  }
-
-  InputImage? _inputImageFromCameraImage(CameraImage image) {
-    final controller = _cameraController;
-    if (controller == null) return null;
-    final rotation = _rotationForImage(controller.description, controller.value.deviceOrientation);
-    final size = Size(image.width.toDouble(), image.height.toDouble());
-
-    if (Platform.isAndroid) {
-      final nv21 = _convertToNv21(image);
-      final metadata = InputImageMetadata(
-        size: size,
-        rotation: rotation,
-        format: InputImageFormat.nv21,
-        bytesPerRow: image.width,
-      );
-      return InputImage.fromBytes(bytes: nv21, metadata: metadata);
-    }
-
-    final format = InputImageFormatValue.fromRawValue(image.format.raw);
-    if (format == null) {
-      debugPrint('Unsupported camera format: ${image.format.raw}');
-      return null;
-    }
-    final bytes = _concatenatePlanes(image.planes);
-    final metadata = InputImageMetadata(
-      size: size,
-      rotation: rotation,
-      format: format,
-      bytesPerRow: image.planes.first.bytesPerRow,
-    );
-    return InputImage.fromBytes(bytes: bytes, metadata: metadata);
-  }
-
-  Uint8List _convertToNv21(CameraImage image) {
-    final width = image.width;
-    final height = image.height;
-    final yPlane = image.planes[0];
-    final uPlane = image.planes[1];
-    final vPlane = image.planes[2];
-
-    final nv21 = Uint8List(width * height + (width * height ~/ 2));
-
-    // Copy Y plane.
-    int yIndex = 0;
-    for (int row = 0; row < height; row++) {
-      final int rowStart = row * yPlane.bytesPerRow;
-      final int rowEnd = rowStart + width;
-      if (rowEnd > yPlane.bytes.length) {
-        break;
-      }
-      nv21.setRange(yIndex, yIndex + width, yPlane.bytes, rowStart);
-      yIndex += width;
-    }
-
-    // Interleave V and U for NV21.
-    int uvIndex = width * height;
-    final int uvRowStride = uPlane.bytesPerRow;
-    final int uvPixelStride = uPlane.bytesPerPixel ?? 1;
-    for (int row = 0; row < height ~/ 2; row++) {
-      final int uvRowStart = row * uvRowStride;
-      for (int col = 0; col < width ~/ 2; col++) {
-        final int uvOffset = uvRowStart + col * uvPixelStride;
-        if (uvOffset >= uPlane.bytes.length || uvOffset >= vPlane.bytes.length) {
-          continue;
-        }
-        nv21[uvIndex++] = vPlane.bytes[uvOffset];
-        nv21[uvIndex++] = uPlane.bytes[uvOffset];
-      }
-    }
-
-    return nv21;
-  }
-
-  InputImageRotation _rotationForImage(
-    CameraDescription description,
-    DeviceOrientation deviceOrientation,
-  ) {
-    final rotation = _deviceRotation[deviceOrientation] ?? 0;
-    int rotationCompensation;
-    if (Platform.isIOS) {
-      rotationCompensation = rotation;
-    } else {
-      if (description.lensDirection == CameraLensDirection.front) {
-        rotationCompensation = (description.sensorOrientation + rotation) % 360;
-      } else {
-        rotationCompensation = (description.sensorOrientation - rotation + 360) % 360;
-      }
-    }
-    return InputImageRotationValue.fromRawValue(rotationCompensation) ??
-        InputImageRotation.rotation0deg;
-  }
-
-  Uint8List _concatenatePlanes(List<Plane> planes) {
-    final buffer = WriteBuffer();
-    for (final plane in planes) {
-      buffer.putUint8List(plane.bytes);
-    }
-    return buffer.done().buffer.asUint8List();
-  }
-
-  String _mergeRecognizedText(List<RecognizedText> results) {
-    final seen = <String>{};
-    final merged = <String>[];
-    for (final result in results) {
-      final text = result.text.trim();
-      if (text.isEmpty) continue;
-      final normalized = _normalizeText(text);
-      if (seen.add(normalized)) {
-        merged.add(text);
-      }
-    }
-    return merged.join('\n').trim();
-  }
-
-  void _handleOcrResult(String text, CameraImage image) {
-    final cleaned = text.trim();
-    if (cleaned.isEmpty) return;
-    final normalized = _normalizeText(cleaned);
-    if (normalized.isEmpty) return;
-
-    final now = DateTime.now();
-    if (normalized == _lastEmittedText && now.difference(_lastEmitTime) < _emitCooldown) {
-      return;
-    }
-
-    if (_lastEmittedText.isNotEmpty) {
-      final similarity = _jaccardSimilarity(normalized, _lastEmittedText);
-      if (similarity >= 0.9 && now.difference(_lastEmitTime) < const Duration(seconds: 4)) {
-        return;
-      }
-    }
-
-    _lastEmittedText = normalized;
-    _lastEmitTime = now;
-    if (mounted) {
-      setState(() {
-        _conversationModeEnabled = enable;
-        if (enable) {
-          _intentModeEnabled = false;
-          _intentInFlight = false;
-          _pendingIntentQuery = null;
-          _activeIntentQuery = null;
-        }
-      });
-    }
-    if (!enable) {
-      _pendingConversationQuestion = null;
-      _conversationInFlight = false;
-      await _voiceAssistant.stop();
-      return;
-    }
-    if (_intentModeEnabled) {
-      _intentModeEnabled = false;
-      _activeIntentQuery = null;
-    }
-    await _requestConversationQuestion(initialPrompt: true);
-  }
-
-  void _updateOcrPreview(String text) {
-    final cleaned = text.trim();
-    if (cleaned.isEmpty) return;
-    if (mounted) {
-      setState(() {
-        _latestOcrText = cleaned;
-      });
-    }
-  }
-
-  Future<void> _maybeSendToGemini(String text, CameraImage image) async {
-    if (_signboardReady) {
-      return;
-    }
-    if (_geminiInFlight) return;
-    if (!_geminiService.hasApiKey) {
-      debugPrint('GEMINI_API_KEY not set. Skipping Gemini.');
-      if (mounted) {
-        setState(() {
-          _latestGeminiError =
-              'Gemini API key missing. Run with --dart-define=GEMINI_API_KEY=YOUR_KEY';
-          _latestSmartText = '';
-          _latestSmartEmpty = false;
-        });
-      }
-      return;
-    }
-    final prompt = initialPrompt
-        ? 'Conversation mode on. Ask your question.'
-        : 'Ask another question.';
-    await _voiceAssistant.requestUserQuery(
-      prompt: _soundEnabled ? prompt : null,
-      onUserResponse: (text) async {
-        final trimmed = text.trim();
-        if (trimmed.isEmpty) return;
-        _pendingConversationQuestion = trimmed;
-      },
-    );
-  }
-
-  Future<void> _requestIntentQuery({required bool initialPrompt}) async {
-    if (!_cameraReady) {
-      if (_soundEnabled) {
-        await _voiceAssistant.speak('Camera is not ready yet.');
-      }
-      return;
-    }
-    final prompt = initialPrompt
-        ? 'Intent search on. What are you looking for?'
-        : 'What should I look for?';
-    await _voiceAssistant.requestUserQuery(
-      prompt: _soundEnabled ? prompt : null,
-      onUserResponse: (text) async {
-        final trimmed = text.trim();
-        if (trimmed.isEmpty) return;
-        _pendingIntentQuery = trimmed;
-        _activeIntentQuery = trimmed;
-      },
-    );
-  }
-
-  Widget _buildSmartOverlay() {
-    final hasError = _latestGeminiError != null && _latestGeminiError!.isNotEmpty;
-    final hasSmart = _latestSmartText.isNotEmpty;
-
-    String title;
-    String body;
-    Color accentColor;
-
-    if (hasError) {
-      title = 'Smart reading unavailable';
-      body = _latestGeminiError!;
-      accentColor = const Color(0xFFFFA3A3);
-    } else if (hasSmart) {
-      title = 'Smart reading';
-      body = _latestSmartText;
-      accentColor = const Color(0xFFB6F3C2);
-    } else if (_latestSmartEmpty) {
-      title = 'No useful text found yet';
-      body = 'Try moving closer or centering the signboard.';
-      accentColor = const Color(0xFFFFE4A3);
-    } else {
-      title = 'Analyzing signboard...';
-      body = _latestOcrText.isNotEmpty
-          ? _truncateText(_latestOcrText, maxChars: 140)
-          : 'Point your camera at a signboard.';
-      accentColor = const Color(0xFFB3D4FF);
-    }
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.75),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: accentColor.withValues(alpha: 0.9), width: 1),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(
-            children: [
-              Icon(
-                hasError ? Icons.error_outline : Icons.auto_awesome,
-                color: accentColor,
-                size: 20,
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  title,
-                  style: GoogleFonts.outfit(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w700,
-                    color: accentColor,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          Text(
-            body,
-            maxLines: 4,
-            overflow: TextOverflow.ellipsis,
-            style: GoogleFonts.outfit(
-              fontSize: 16,
-              fontWeight: FontWeight.w600,
-              color: Colors.white,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDetectionCard({
-    required String title,
-    required String body,
-    required Color accentColor,
-  }) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.75),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: accentColor.withValues(alpha: 0.9), width: 1),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            title,
-            style: GoogleFonts.outfit(
-              fontSize: 13,
-              fontWeight: FontWeight.w700,
-              color: accentColor,
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            body,
-            style: GoogleFonts.outfit(
-              fontSize: 14,
-              fontWeight: FontWeight.w600,
-              color: Colors.white,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDetectionOverlay() {
-    if (_currentState != HomeState.scanning) {
-      return const SizedBox.shrink();
-    }
-    final roadAlerts = _filterAlertDetections(_latestDetections, _roadAlertLabels);
-    final indoorAlerts =
-        _filterAlertDetections(_latestIndoorDetections, _indoorAlertLabels);
-    String roadTitle;
-    String roadBody;
-    Color roadAccentColor;
-
-    if (_yoloError != null) {
-      roadTitle = 'Object detection unavailable';
-      roadBody = _yoloError!;
-      roadAccentColor = const Color(0xFFFFA3A3);
-    } else if (!_yoloReady) {
-      roadTitle = 'Loading detector...';
-      roadBody = 'Preparing road model.';
-      roadAccentColor = const Color(0xFFB3D4FF);
-    } else if (roadAlerts.isEmpty) {
-      roadTitle = 'No road alerts';
-      roadBody = 'No nearby hazards detected.';
-      roadAccentColor = const Color(0xFFFFE4A3);
-    } else {
-      final top = roadAlerts.first;
-      final distanceText = top.distanceMeters == null
-          ? ''
-          : ' • ${top.distanceMeters!.toStringAsFixed(1)}m';
-      roadTitle = 'Road alert';
-      roadBody =
-          '${top.label} • ${top.proximity}$distanceText • ${(top.score * 100).toStringAsFixed(1)}%';
-      roadAccentColor = const Color(0xFFB6F3C2);
-    }
-
-    String indoorTitle;
-    String indoorBody;
-    Color indoorAccentColor;
-
-    if (_indoorError != null) {
-      indoorTitle = 'Indoor detection unavailable';
-      indoorBody = _indoorError!;
-      indoorAccentColor = const Color(0xFFFFA3A3);
-    } else if (!_indoorReady) {
-      indoorTitle = 'Loading indoor detector...';
-      indoorBody = 'Preparing indoor model.';
-      indoorAccentColor = const Color(0xFFB3D4FF);
-    } else if (indoorAlerts.isEmpty) {
-      indoorTitle = 'No indoor alerts';
-      indoorBody = 'No nearby hazards detected.';
-      indoorAccentColor = const Color(0xFFFFE4A3);
-    } else {
-      final top = indoorAlerts.first;
-      final distanceText = top.distanceMeters == null
-          ? ''
-          : ' • ${top.distanceMeters!.toStringAsFixed(1)}m';
-      indoorTitle = 'Indoor alert';
-      indoorBody =
-          '${top.label} • ${top.proximity}$distanceText • ${(top.score * 100).toStringAsFixed(1)}%';
-      indoorAccentColor = const Color(0xFFB6F3C2);
-    }
-
-    return Positioned(
-      left: 16,
-      top: 16,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _buildDetectionCard(
-            title: roadTitle,
-            body: roadBody,
-            accentColor: roadAccentColor,
-          ),
-          const SizedBox(height: 8),
-          _buildDetectionCard(
-            title: indoorTitle,
-            body: indoorBody,
-            accentColor: indoorAccentColor,
-          ),
-        ],
-      ),
-    );
-  }
-
-  List<YoloDetection> _filterAlertDetections(
-    List<YoloDetection> detections,
-    Set<String> allowedLabels,
-  ) {
-    if (detections.isEmpty) return const [];
-    final alerts = detections.where((d) {
-      final normalized = _normalizeLabelForAlert(d.label);
-      if (!allowedLabels.contains(normalized)) return false;
-      if (d.distanceMeters != null) {
-        return d.distanceMeters! <= 10.0;
-      }
-      return d.proximity != 'far';
-    }).toList();
-    alerts.sort((a, b) {
-      final da = a.distanceMeters;
-      final db = b.distanceMeters;
-      if (da != null && db != null) {
-        return da.compareTo(db);
-      }
-      if (da != null) return -1;
-      if (db != null) return 1;
-      return b.score.compareTo(a.score);
-    });
-    return alerts;
-  }
-
-  String _normalizeLabelForAlert(String label) {
-    final lowered = label.trim().toLowerCase();
-    return lowered.replaceAll(RegExp(r'[^a-z0-9]+'), '');
-  }
-
-  int _urgencyRank(YoloDetection detection) {
-    final distance = detection.distanceMeters;
-    if (distance != null) {
-      if (distance <= 3.0) return 0;
-      if (distance <= 6.0) return 1;
-      if (distance <= 10.0) return 2;
-      return 3;
-    }
-    switch (detection.proximity) {
-      case 'urgent':
-        return 0;
-      case 'near':
-        return 1;
-      case 'mid':
-        return 2;
-      default:
-        return 3;
-    }
-  }
-
-  YoloDetection? _pickMostUrgentAlert(
-    List<YoloDetection> roadAlerts,
-    List<YoloDetection> indoorAlerts,
-  ) {
-    final combined = <YoloDetection>[
-      ...roadAlerts,
-      ...indoorAlerts,
-    ];
-    if (combined.isEmpty) return null;
-    combined.sort((a, b) {
-      final rankDiff = _urgencyRank(a).compareTo(_urgencyRank(b));
-      if (rankDiff != 0) return rankDiff;
-      final da = a.distanceMeters;
-      final db = b.distanceMeters;
-      if (da != null && db != null && da != db) {
-        return da.compareTo(db);
-      }
-      return b.score.compareTo(a.score);
-    });
-    return combined.first;
-  }
-
-  String _directionForRect(Rect rect) {
-    final frame = _lastFrameSize;
-    if (frame == null || frame.width <= 0) return 'ahead';
-    final centerX = rect.center.dx / frame.width;
-    if (centerX < 0.35) return 'left';
-    if (centerX > 0.65) return 'right';
-    return 'ahead';
-  }
-
-  String _distanceDescriptor(YoloDetection detection) {
-    final distance = detection.distanceMeters;
-    if (distance != null) {
-      if (distance <= 3.0) return 'very close';
-      if (distance <= 6.0) return 'nearby';
-      if (distance <= 10.0) return 'ahead';
-      return 'far';
-    }
-    switch (detection.proximity) {
-      case 'urgent':
-        return 'very close';
-      case 'near':
-        return 'nearby';
-      case 'mid':
-        return 'ahead';
-      default:
-        return 'far';
-    }
-  }
-
-  String _humanizeLabel(String label) {
-    final withSpaces = label
-        .replaceAll(RegExp(r'[_/]+'), ' ')
-        .replaceAllMapped(RegExp(r'([a-z])([A-Z])'), (m) => '${m[1]} ${m[2]}');
-    return withSpaces.trim().toLowerCase();
-  }
-
-  String _capitalize(String text) {
-    if (text.isEmpty) return text;
-    return text[0].toUpperCase() + text.substring(1);
-  }
-
-  String _buildAlertMessage(YoloDetection detection) {
-    final normalized = _normalizeLabelForAlert(detection.label);
-    final spokenLabel = _alertSpokenLabels[normalized] ?? _humanizeLabel(detection.label);
-    final direction = _directionForRect(detection.rect);
-    var distanceWord = _distanceDescriptor(detection);
-    if (direction != 'ahead' && distanceWord == 'ahead') {
-      distanceWord = 'nearby';
-    }
-    final directionPhrase = direction == 'ahead' ? 'ahead' : 'on your $direction';
-    final guidance = _alertGuidance[normalized];
-    final base = '${_capitalize(spokenLabel)} $distanceWord $directionPhrase.';
-    if (guidance == null) return base;
-    return '$base $guidance';
-  }
-
-  String _alertKey(YoloDetection detection) {
-    final normalized = _normalizeLabelForAlert(detection.label);
-    final direction = _directionForRect(detection.rect);
-    return '$normalized:${detection.proximity}:$direction';
-  }
-
-  Future<void> _maybeSpeakAlerts() async {
-    if (!_soundEnabled) return;
-    if (_voiceAssistant.isListening.value || _voiceAssistant.isSpeaking.value) return;
-    final now = DateTime.now();
-    if (now.difference(_lastAlertSpokenAt) < _alertSpeakCooldown) return;
-
-    final roadAlerts = _filterAlertDetections(_latestDetections, _roadAlertLabels);
-    final indoorAlerts = _filterAlertDetections(_latestIndoorDetections, _indoorAlertLabels);
-    final candidate = _pickMostUrgentAlert(roadAlerts, indoorAlerts);
-    if (candidate == null) return;
-
-    final message = _buildAlertMessage(candidate);
-    if (message.trim().isEmpty) return;
-
-    final key = _alertKey(candidate);
-    if (key == _lastAlertKey && now.difference(_lastAlertSpokenAt) < const Duration(seconds: 8)) {
-      return;
-    }
-
-    _lastAlertKey = key;
-    _lastAlertSpokenAt = now;
-    await _voiceAssistant.speak(message);
-  }
-
-  Future<void> _disposeController(CameraController controller) async {
-    try {
-      if (controller.value.isStreamingImages) {
-        await controller.stopImageStream();
-      }
-    } catch (_) {}
-    try {
-      await controller.dispose();
-    } catch (_) {}
-  }
-
-  Future<void> _processCameraImage(CameraImage image) async {
-    if (_isProcessingFrame) return;
-    if (!mounted || _currentState != HomeState.scanning) return;
-    final now = DateTime.now();
-    if (now.difference(_lastAnalysisTime) < _analysisInterval) return;
-    _isProcessingFrame = true;
-    _lastAnalysisTime = now;
-    _lastFrameSize = Size(image.width.toDouble(), image.height.toDouble());
-    _frameIndex++;
-    try {
-      final inputImage = _inputImageFromCameraImage(image);
-      if (inputImage == null) return;
-      final recognizers = _activeRecognizers();
-      if (recognizers.isEmpty) return;
-      final results = await Future.wait(
-        recognizers.map((recognizer) => recognizer.processImage(inputImage)),
-      );
-      final mergedRect = _mergeBoundingBoxes(results);
-      final mergedText = _mergeRecognizedText(
-        results,
-        focusRect: mergedRect,
-        imageSize: _lastFrameSize,
-      );
-      if (_pendingConversationQuestion != null && !_conversationInFlight) {
-        final question = _pendingConversationQuestion!;
-        _pendingConversationQuestion = null;
-        unawaited(_answerConversation(question, mergedText, image));
-      }
-      if (_intentModeEnabled &&
-          _activeIntentQuery != null &&
-          !_intentInFlight &&
-          !_conversationInFlight &&
-          _pendingConversationQuestion == null) {
-        final query = _activeIntentQuery!;
-        unawaited(_checkIntentMatch(query, mergedText, image, mergedRect));
-      }
-      _handleOcrResult(mergedText, image, mergedRect);
-
-      final bool shouldRunRoad = _yoloReady &&
-          !_yoloInFlight &&
-          _frameIndex % _yoloFrameStride == 0 &&
-          now.difference(_lastYoloTime) > _yoloInterval;
-      final bool shouldRunIndoor = _indoorReady &&
-          !_indoorInFlight &&
-          _frameIndex % _indoorFrameStride == _indoorFrameOffset &&
-          now.difference(_lastIndoorTime) > _yoloInterval;
-      if (shouldRunRoad) {
-        _yoloInFlight = true;
-        _lastYoloTime = now;
-      }
-      if (shouldRunIndoor) {
-        _indoorInFlight = true;
-        _lastIndoorTime = now;
-      }
-      bool shouldSpeakAlerts = false;
-      if (shouldRunRoad || shouldRunIndoor) {
-        final rgbImage = _buildRgbImageForYolo(image);
-        if (rgbImage != null) {
-          if (shouldRunRoad) {
-            final detections = await _yoloDetector.detect(rgbImage);
-            if (mounted) {
-              setState(() {
-                _latestDetections = detections;
-              });
-            }
-            shouldSpeakAlerts = true;
-          }
-          if (shouldRunIndoor) {
-            final detections = await _indoorDetector.detect(
-              rgbImage,
-              confThreshold: 0.25,
-            );
-            if (mounted) {
-              setState(() {
-                _latestIndoorDetections = detections;
-              });
-            }
-            shouldSpeakAlerts = true;
-          }
-        }
-        if (shouldRunRoad) {
-          _yoloInFlight = false;
-        }
-        if (shouldRunIndoor) {
-          _indoorInFlight = false;
-        }
-        if (shouldSpeakAlerts) {
-          unawaited(_maybeSpeakAlerts());
-        }
-      }
-    } catch (error) {
-      debugPrint('OCR error: $error');
     } finally {
       _isProcessingFrame = false;
     }
@@ -3292,17 +2628,102 @@ class _HomeScreenState extends State<HomeScreen>
     _detectedAnnounced = false;
   }
 
-  double _rectIoU(Rect a, Rect b) {
-    final left = a.left > b.left ? a.left : b.left;
-    final top = a.top > b.top ? a.top : b.top;
-    final right = a.right < b.right ? a.right : b.right;
-    final bottom = a.bottom < b.bottom ? a.bottom : b.bottom;
-    final overlapWidth = right - left;
-    final overlapHeight = bottom - top;
-    if (overlapWidth <= 0 || overlapHeight <= 0) return 0;
-    final intersection = overlapWidth * overlapHeight;
-    final union = a.width * a.height + b.width * b.height - intersection;
-    return union <= 0 ? 0 : intersection / union;
+  void _updateOcrPreview(String text) {
+    final cleaned = text.trim();
+    if (cleaned.isEmpty) return;
+    if (mounted) {
+      setState(() {
+        _latestOcrText = cleaned;
+      });
+    }
+  }
+
+  Future<void> _toggleConversationMode() async {
+    final enable = !_conversationModeEnabled;
+    if (mounted) {
+      setState(() {
+        _conversationModeEnabled = enable;
+        if (enable) {
+          _intentModeEnabled = false;
+          _intentInFlight = false;
+          _pendingIntentQuery = null;
+          _activeIntentQuery = null;
+        }
+      });
+    }
+    if (!enable) {
+      _pendingConversationQuestion = null;
+      _conversationInFlight = false;
+      await _voiceAssistant.stop();
+      return;
+    }
+    if (_intentModeEnabled) {
+      _intentModeEnabled = false;
+      _activeIntentQuery = null;
+    }
+    await _requestConversationQuestion(initialPrompt: true);
+  }
+
+  Future<void> _requestConversationQuestion({required bool initialPrompt}) async {
+    if (!_cameraReady) {
+      if (_soundEnabled) {
+        await _voiceAssistant.speak('Camera is not ready yet.');
+      }
+      return;
+    }
+    final prompt = initialPrompt
+        ? 'Conversation mode on. Ask your question.'
+        : 'Ask another question.';
+    await _voiceAssistant.requestUserQuery(
+      prompt: _soundEnabled ? prompt : null,
+      onUserResponse: (text) async {
+        final trimmed = text.trim();
+        if (trimmed.isEmpty) return;
+        _pendingConversationQuestion = trimmed;
+      },
+    );
+  }
+
+  Future<void> _toggleIntentMode() async {
+    final enable = !_intentModeEnabled;
+    if (mounted) {
+      setState(() {
+        _intentModeEnabled = enable;
+        if (enable) {
+          _conversationModeEnabled = false;
+          _conversationInFlight = false;
+          _pendingConversationQuestion = null;
+        }
+      });
+    }
+    if (!enable) {
+      _pendingIntentQuery = null;
+      _activeIntentQuery = null;
+      _intentInFlight = false;
+      return;
+    }
+    await _requestIntentQuery(initialPrompt: true);
+  }
+
+  Future<void> _requestIntentQuery({required bool initialPrompt}) async {
+    if (!_cameraReady) {
+      if (_soundEnabled) {
+        await _voiceAssistant.speak('Camera is not ready yet.');
+      }
+      return;
+    }
+    final prompt = initialPrompt
+        ? 'Intent search on. What are you looking for?'
+        : 'What should I look for?';
+    await _voiceAssistant.requestUserQuery(
+      prompt: _soundEnabled ? prompt : null,
+      onUserResponse: (text) async {
+        final trimmed = text.trim();
+        if (trimmed.isEmpty) return;
+        _pendingIntentQuery = trimmed;
+        _activeIntentQuery = trimmed;
+      },
+    );
   }
 
   Rect? _mergeRect(Rect? merged, Rect rect) {
@@ -4147,3 +3568,4 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 }
+
