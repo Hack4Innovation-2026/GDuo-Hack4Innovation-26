@@ -72,7 +72,12 @@ class YoloDetectorService {
               'table': 0.75,
               'cabinet': 1.8,
               'sofa/couch': 1.0,
+              'couch': 1.0,
               'pole': 2.5,
+              'vehicle': 1.5,
+              'living': 1.7,
+              'roadside': 2.5,
+              'electric_pole': 2.5,
               'road': 1.0,
             };
 
@@ -148,21 +153,36 @@ class YoloDetectorService {
       return [];
     }
 
-    final int channels = shape[1];
-    final int numBoxes = shape[2];
+    final bool transposed = shape.length == 3 && shape[1] > shape[2];
+    final int channels = transposed ? shape[2] : shape[1];
+    final int numBoxes = transposed ? shape[1] : shape[2];
     final int numClasses = channels - 4;
+    if (channels < 5 || numBoxes <= 0 || numClasses <= 0) {
+      input.release();
+      for (final out in outputs) {
+        out?.release();
+      }
+      return [];
+    }
+
+    double valueAt(int boxIndex, int channelIndex) {
+      if (transposed) {
+        return data[boxIndex * channels + channelIndex];
+      }
+      return data[numBoxes * channelIndex + boxIndex];
+    }
 
     final detections = <YoloDetection>[];
     for (int i = 0; i < numBoxes; i++) {
-      final double cx = data[i];
-      final double cy = data[numBoxes + i];
-      final double w = data[numBoxes * 2 + i];
-      final double h = data[numBoxes * 3 + i];
+      final double cx = valueAt(i, 0);
+      final double cy = valueAt(i, 1);
+      final double w = valueAt(i, 2);
+      final double h = valueAt(i, 3);
 
       double bestScore = 0.0;
       int bestClass = -1;
       for (int c = 0; c < numClasses; c++) {
-        final double score = data[numBoxes * (4 + c) + i];
+        final double score = valueAt(i, 4 + c);
         if (score > bestScore) {
           bestScore = score;
           bestClass = c;
@@ -320,6 +340,10 @@ class YoloDetectorService {
     required String label,
   }) {
     if (rect.height <= 1) return null;
+    final normalized = label.trim().toLowerCase();
+    if (_distanceIgnoredLabels.contains(normalized)) {
+      return null;
+    }
     final double objectHeightM = objectHeightsMeters[label] ?? defaultObjectHeightM;
     if (objectHeightM <= 0) return null;
     final double fovRadians = cameraFovDegrees * pi / 180.0;
@@ -328,6 +352,14 @@ class YoloDetectorService {
     if (distance.isNaN || distance.isInfinite) return null;
     return distance;
   }
+
+  static const Set<String> _distanceIgnoredLabels = {
+    'drivable',
+    'non_drivable',
+    'far',
+    'sky',
+    'road',
+  };
 
   List<YoloDetection> _nonMaxSuppression(List<YoloDetection> dets, double iouThreshold) {
     if (dets.isEmpty) return dets;

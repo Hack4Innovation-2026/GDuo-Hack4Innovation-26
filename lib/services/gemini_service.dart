@@ -3,11 +3,16 @@ import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
+import '../config/config.dart';
+
 class GeminiService {
   GeminiService({
     String? apiKey,
     String? model,
-  })  : _apiKey = apiKey ?? const String.fromEnvironment('GEMINI_API_KEY'),
+  })  : _apiKey = apiKey ??
+            (const String.fromEnvironment('GEMINI_API_KEY').isNotEmpty
+                ? const String.fromEnvironment('GEMINI_API_KEY')
+                : GEMINI_API_KEY),
         _model = model ??
             const String.fromEnvironment(
               'GEMINI_MODEL',

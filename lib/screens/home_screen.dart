@@ -48,6 +48,7 @@ class _HomeScreenState extends State<HomeScreen>
   late final TextRecognizer _tamilTextRecognizer;
   late final YoloDetectorService _yoloDetector;
   late final YoloDetectorService _indoorDetector;
+  late final YoloDetectorService _signboardDetector;
 
   bool _isProcessingFrame = false;
   bool _yoloReady = false;
@@ -58,6 +59,10 @@ class _HomeScreenState extends State<HomeScreen>
   bool _indoorInFlight = false;
   String? _indoorError;
   List<YoloDetection> _latestIndoorDetections = [];
+  bool _signboardReady = false;
+  bool _signboardInFlight = false;
+  String? _signboardError;
+  List<YoloDetection> _latestSignboardDetections = [];
   DateTime _lastAnalysisTime = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastYoloTime = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastIndoorTime = DateTime.fromMillisecondsSinceEpoch(0);
@@ -75,6 +80,13 @@ class _HomeScreenState extends State<HomeScreen>
   Size? _lastFrameSize;
   DateTime _lastAlertSpokenAt = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastAlertKey = '';
+  DateTime _lastSignboardSpokenAt = DateTime.fromMillisecondsSinceEpoch(0);
+  String _lastSignboardText = '';
+  DateTime _lastSignboardTime = DateTime.fromMillisecondsSinceEpoch(0);
+  Rect? _signboardLandmark;
+  DateTime _signboardLandmarkAt = DateTime.fromMillisecondsSinceEpoch(0);
+  int _signboardLandmarkStreak = 0;
+  YoloDetection? _lastSignboardDetection;
 
   static const Duration _analysisInterval = Duration(milliseconds: 500);
   static const Duration _emitCooldown = Duration(milliseconds: 1500);
@@ -85,32 +97,24 @@ class _HomeScreenState extends State<HomeScreen>
   static const int _yoloFrameStride = 4;
   static const int _indoorFrameStride = 4;
   static const int _indoorFrameOffset = 2;
+  static const Duration _signboardInterval = Duration(milliseconds: 1200);
+  static const int _signboardFrameStride = 5;
+  static const int _signboardFrameOffset = 1;
+  static const Duration _signboardSpeakCooldown = Duration(seconds: 6);
+  static const Duration _signboardLandmarkHold = Duration(seconds: 2);
+  static const double _signboardLandmarkSmoothing = 0.6;
   int _frameIndex = 0;
+  static const double _roadMinConfidence = 0.35;
+  static const double _indoorMinConfidence = 0.4;
+  static const int _alertStreakTarget = 2;
+  final Map<String, int> _alertStreaks = {};
 
   static const Set<String> _roadAlertLabels = {
-    'car',
-    'truck',
-    'bus',
-    'motorcycle',
-    'bicycle',
-    'person',
-    'pothole',
-    'speedbump',
-    'bump',
-    'barricade',
-    'barrier',
-    'construction',
-    'cone',
-    'pole',
-    'electricpole',
-    'powerpole',
-    'streetlight',
-    'stair',
-    'stairs',
-    'road',
-    'rickshaw',
-    'autorickshaw',
-    'scooter',
+    'vehiclehazard',
+    'humannearby',
+    'animalhazard',
+    'roadhazard',
+    'roadsideobstacle',
   };
 
   static const Set<String> _indoorAlertLabels = {
@@ -119,12 +123,91 @@ class _HomeScreenState extends State<HomeScreen>
     'cabinetdoor',
     'refrigeratordoor',
     'window',
+    'chair',
+    'table',
+    'cabinet',
+    'couch',
     'pole',
     'stair',
     'stairs',
   };
 
+  static const String _vehicleHazardLabel = 'vehicle_hazard';
+  static const String _humanHazardLabel = 'human_nearby';
+  static const String _animalHazardLabel = 'animal_hazard';
+  static const String _roadHazardLabel = 'road_hazard';
+  static const String _roadsideHazardLabel = 'roadside_obstacle';
+
+  static const Set<String> _vehicleClassLabels = {
+    'vehicle',
+    'car',
+    'bus',
+    'truck',
+    'motorcycle',
+    'bicycle',
+    'train',
+    'boat',
+    'autorickshaw',
+    'rickshaw',
+    'scooter',
+  };
+
+  static const Set<String> _humanClassLabels = {
+    'person',
+    'living',
+  };
+
+  static const Set<String> _animalClassLabels = {
+    'dog',
+    'cat',
+    'cow',
+    'horse',
+    'sheep',
+    'goat',
+    'elephant',
+    'bear',
+  };
+
+  static const Set<String> _roadHazardClassLabels = {
+    'pothole',
+    'speedbump',
+    'bump',
+    'non_drivable',
+    'road',
+    'roadhazard',
+  };
+
+  static const Set<String> _roadsideClassLabels = {
+    'roadside',
+    'pole',
+    'electricpole',
+    'powerpole',
+    'streetlight',
+    'tree',
+    'trashbin',
+    'trashcan',
+    'bin',
+    'barrier',
+    'barricade',
+    'construction',
+    'cone',
+    'fence',
+    'bench',
+    'firehydrant',
+    'parkingmeter',
+    'stopsign',
+    'trafficsignal',
+    'trafficlight',
+  };
+
   static const Map<String, String> _alertSpokenLabels = {
+    'non_drivable': 'unsafe surface',
+    'living': 'person',
+    'roadside': 'roadside object',
+    'vehicle': 'vehicle',
+    'drivable': 'road',
+    'far': 'distant area',
+    'sky': 'sky',
     'openeddoor': 'open door',
     'cabinetdoor': 'cabinet door',
     'refrigeratordoor': 'refrigerator door',
@@ -134,9 +217,18 @@ class _HomeScreenState extends State<HomeScreen>
     'autorickshaw': 'auto rickshaw',
     'rickshaw': 'rickshaw',
     'speedbump': 'speed bump',
+    'vehiclehazard': 'vehicle hazard',
+    'humannearby': 'human nearby',
+    'animalhazard': 'animal hazard',
+    'roadhazard': 'road hazard',
+    'roadsideobstacle': 'roadside obstacle',
   };
 
   static const Map<String, String> _alertGuidance = {
+    'vehicle': 'Keep left.',
+    'living': 'Give way.',
+    'roadside': 'Obstacle ahead.',
+    'non_drivable': 'Unsafe surface ahead.',
     'car': 'Keep left.',
     'truck': 'Keep left.',
     'bus': 'Keep left.',
@@ -162,6 +254,148 @@ class _HomeScreenState extends State<HomeScreen>
     'electricpole': 'Obstacle ahead.',
     'powerpole': 'Obstacle ahead.',
     'streetlight': 'Obstacle ahead.',
+    'chair': 'Obstacle ahead.',
+    'table': 'Obstacle ahead.',
+    'cabinet': 'Obstacle ahead.',
+    'couch': 'Obstacle ahead.',
+    'vehiclehazard': 'Keep left.',
+    'humannearby': 'Give way.',
+    'animalhazard': 'Be careful.',
+    'roadhazard': 'Watch your step.',
+    'roadsideobstacle': 'Obstacle on the side.',
+  };
+
+  static const List<double> _defaultDistanceBuckets = [3.0, 6.0, 10.0];
+
+  static const Map<String, List<double>> _distanceBucketsByLabel = {
+    'vehicle': [4.0, 8.0, 12.0],
+    'living': [3.5, 7.0, 10.0],
+    'roadside': [3.5, 7.0, 10.0],
+    'electricpole': [3.5, 7.0, 10.0],
+    'powerpole': [3.5, 7.0, 10.0],
+    'streetlight': [3.5, 7.0, 10.0],
+    'door': [2.5, 5.0, 8.0],
+    'openeddoor': [2.5, 5.0, 8.0],
+    'cabinetdoor': [2.0, 4.0, 6.0],
+    'refrigeratordoor': [2.0, 4.0, 6.0],
+    'window': [2.0, 4.0, 7.0],
+    'chair': [2.0, 4.0, 6.0],
+    'table': [2.0, 4.0, 6.0],
+    'cabinet': [2.0, 4.0, 6.0],
+    'couch': [2.0, 4.0, 6.0],
+    'pole': [3.0, 6.0, 9.0],
+    'vehiclehazard': [4.0, 8.0, 12.0],
+    'humannearby': [3.0, 6.0, 10.0],
+    'animalhazard': [3.0, 6.0, 10.0],
+    'roadhazard': [2.5, 5.0, 8.0],
+    'roadsideobstacle': [3.0, 6.0, 10.0],
+  };
+
+  static const Map<String, double> _indoorMinAreaRatio = {
+    'door': 0.03,
+    'openeddoor': 0.03,
+    'cabinetdoor': 0.02,
+    'refrigeratordoor': 0.02,
+    'window': 0.02,
+    'chair': 0.008,
+    'table': 0.01,
+    'cabinet': 0.02,
+    'couch': 0.02,
+    'pole': 0.015,
+  };
+
+  static const Map<String, double> _indoorMinConfidenceByLabel = {
+    'door': 0.45,
+    'openeddoor': 0.45,
+    'cabinetdoor': 0.45,
+    'refrigeratordoor': 0.45,
+    'window': 0.45,
+    'cabinet': 0.45,
+    'chair': 0.4,
+    'table': 0.4,
+    'couch': 0.4,
+    'pole': 0.4,
+  };
+
+  static const Map<String, String> _hindiLabels = {
+    'vehicle': 'वाहन',
+    'living': 'व्यक्ति',
+    'roadside': 'रोडसाइड वस्तु',
+    'non_drivable': 'असुरक्षित सतह',
+    'drivable': 'सड़क',
+    'far': 'दूर क्षेत्र',
+    'sky': 'आसमान',
+    'car': 'कार',
+    'truck': 'ट्रक',
+    'bus': 'बस',
+    'motorcycle': 'मोटरसाइकिल',
+    'bicycle': 'साइकिल',
+    'scooter': 'स्कूटर',
+    'autorickshaw': 'ऑटो',
+    'rickshaw': 'रिक्शा',
+    'pothole': 'गड्ढा',
+    'speedbump': 'स्पीड ब्रेकर',
+    'bump': 'स्पीड ब्रेकर',
+    'barricade': 'बैरिकेड',
+    'barrier': 'बैरियर',
+    'construction': 'निर्माण क्षेत्र',
+    'cone': 'कोन',
+    'electricpole': 'बिजली का खंभा',
+    'powerpole': 'बिजली का खंभा',
+    'streetlight': 'स्ट्रीट लाइट',
+    'door': 'दरवाज़ा',
+    'openeddoor': 'खुला दरवाज़ा',
+    'cabinetdoor': 'कैबिनेट दरवाज़ा',
+    'refrigeratordoor': 'फ्रिज का दरवाज़ा',
+    'chair': 'कुर्सी',
+    'table': 'मेज',
+    'cabinet': 'कैबिनेट',
+    'couch': 'सोफ़ा',
+    'pole': 'खंभा',
+    'vehiclehazard': 'वाहन खतरा',
+    'humannearby': 'व्यक्ति पास में',
+    'animalhazard': 'जानवर खतरा',
+    'roadhazard': 'सड़क खतरा',
+    'roadsideobstacle': 'सड़क किनारे बाधा',
+  };
+
+  static const Map<String, String> _hindiGuidance = {
+    'vehicle': 'बाईं ओर रहें।',
+    'living': 'रास्ता दें।',
+    'roadside': 'सावधान रहें।',
+    'non_drivable': 'सावधान रहें।',
+    'car': 'बाईं ओर रहें।',
+    'truck': 'बाईं ओर रहें।',
+    'bus': 'बाईं ओर रहें।',
+    'motorcycle': 'बाईं ओर रहें।',
+    'bicycle': 'बाईं ओर रहें।',
+    'autorickshaw': 'बाईं ओर रहें।',
+    'rickshaw': 'बाईं ओर रहें।',
+    'scooter': 'बाईं ओर रहें।',
+    'pothole': 'सावधान रहें।',
+    'speedbump': 'धीरे चलें।',
+    'bump': 'धीरे चलें।',
+    'barricade': 'सावधान रहें।',
+    'barrier': 'सावधान रहें।',
+    'construction': 'सावधान रहें।',
+    'cone': 'सावधान रहें।',
+    'door': 'सावधान रहें।',
+    'openeddoor': 'सावधान रहें।',
+    'cabinetdoor': 'सावधान रहें।',
+    'refrigeratordoor': 'सावधान रहें।',
+    'chair': 'सावधान रहें।',
+    'table': 'सावधान रहें।',
+    'cabinet': 'सावधान रहें।',
+    'couch': 'सावधान रहें।',
+    'pole': 'सावधान रहें।',
+    'electricpole': 'सावधान रहें।',
+    'powerpole': 'सावधान रहें।',
+    'streetlight': 'सावधान रहें।',
+    'vehiclehazard': 'बाईं ओर रहें।',
+    'humannearby': 'धीरे चलें।',
+    'animalhazard': 'सावधान रहें।',
+    'roadhazard': 'सावधान रहें।',
+    'roadsideobstacle': 'सावधान रहें।',
   };
 
   static const Map<DeviceOrientation, int> _deviceRotation = {
@@ -194,6 +428,12 @@ class _HomeScreenState extends State<HomeScreen>
       inputSize: 640,
     );
     unawaited(_initializeIndoorYolo());
+    _signboardDetector = YoloDetectorService(
+      modelAsset: SIGNBOARD_YOLO_MODEL_ASSET,
+      labelsAsset: SIGNBOARD_LABELS_ASSET,
+      inputSize: 640,
+    );
+    unawaited(_initializeSignboardYolo());
 
     _micPulseController = AnimationController(
       vsync: this,
@@ -227,6 +467,7 @@ class _HomeScreenState extends State<HomeScreen>
     unawaited(_voiceAssistant.dispose());
     unawaited(_yoloDetector.dispose());
     unawaited(_indoorDetector.dispose());
+    unawaited(_signboardDetector.dispose());
     super.dispose();
   }
 
@@ -682,6 +923,32 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
+  Future<void> _initializeSignboardYolo() async {
+    if (kIsWeb) {
+      if (mounted) {
+        setState(() {
+          _signboardError = 'On-device detection is not available on web.';
+        });
+      }
+      return;
+    }
+    try {
+      await _signboardDetector.initialize();
+      if (!mounted) return;
+      setState(() {
+        _signboardReady = true;
+        _signboardError = null;
+        _latestGeminiError = null;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _signboardReady = false;
+        _signboardError = 'Signboard detector init failed: ${error.toString()}';
+      });
+    }
+  }
+
   void _stopCamera() {
     final controller = _cameraController;
     if (controller == null) return;
@@ -703,7 +970,9 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Widget _buildSmartOverlay() {
-    final hasError = _latestGeminiError != null && _latestGeminiError!.isNotEmpty;
+    final signboardError = _signboardError;
+    final hasError = (signboardError != null && signboardError.isNotEmpty) ||
+        (_latestGeminiError != null && _latestGeminiError!.isNotEmpty);
     final hasSmart = _latestSmartText.isNotEmpty;
 
     String title;
@@ -711,8 +980,12 @@ class _HomeScreenState extends State<HomeScreen>
     Color accentColor;
 
     if (hasError) {
-      title = 'Smart reading unavailable';
-      body = _latestGeminiError!;
+      title = signboardError != null && signboardError.isNotEmpty
+          ? 'Signboard detector unavailable'
+          : 'Smart reading unavailable';
+      body = signboardError != null && signboardError.isNotEmpty
+          ? signboardError
+          : (_latestGeminiError ?? 'Unknown error');
       accentColor = const Color(0xFFFFA3A3);
     } else if (hasSmart) {
       title = 'Smart reading';
@@ -835,9 +1108,20 @@ class _HomeScreenState extends State<HomeScreen>
       roadBody = 'Preparing road model.';
       roadAccentColor = const Color(0xFFB3D4FF);
     } else if (roadAlerts.isEmpty) {
-      roadTitle = 'No road alerts';
-      roadBody = 'No nearby hazards detected.';
-      roadAccentColor = const Color(0xFFFFE4A3);
+      final fallback = _topByScore(_latestDetections);
+      if (fallback == null) {
+        roadTitle = 'No road alerts';
+        roadBody = 'No nearby hazards detected.';
+        roadAccentColor = const Color(0xFFFFE4A3);
+      } else {
+        final distanceText = fallback.distanceMeters == null
+            ? ''
+            : ' • ${fallback.distanceMeters!.toStringAsFixed(1)}m';
+        roadTitle = 'Road detected';
+        roadBody =
+            '${fallback.label}$distanceText • ${(fallback.score * 100).toStringAsFixed(1)}%';
+        roadAccentColor = const Color(0xFF9FB0C7);
+      }
     } else {
       final top = roadAlerts.first;
       final distanceText = top.distanceMeters == null
@@ -862,9 +1146,20 @@ class _HomeScreenState extends State<HomeScreen>
       indoorBody = 'Preparing indoor model.';
       indoorAccentColor = const Color(0xFFB3D4FF);
     } else if (indoorAlerts.isEmpty) {
-      indoorTitle = 'No indoor alerts';
-      indoorBody = 'No nearby hazards detected.';
-      indoorAccentColor = const Color(0xFFFFE4A3);
+      final fallback = _topByScore(_latestIndoorDetections);
+      if (fallback == null) {
+        indoorTitle = 'No indoor alerts';
+        indoorBody = 'No nearby hazards detected.';
+        indoorAccentColor = const Color(0xFFFFE4A3);
+      } else {
+        final distanceText = fallback.distanceMeters == null
+            ? ''
+            : ' • ${fallback.distanceMeters!.toStringAsFixed(1)}m';
+        indoorTitle = 'Indoor detected';
+        indoorBody =
+            '${fallback.label}$distanceText • ${(fallback.score * 100).toStringAsFixed(1)}%';
+        indoorAccentColor = const Color(0xFF9FB0C7);
+      }
     } else {
       final top = indoorAlerts.first;
       final distanceText = top.distanceMeters == null
@@ -904,11 +1199,20 @@ class _HomeScreenState extends State<HomeScreen>
     Set<String> allowedLabels,
   ) {
     if (detections.isEmpty) return const [];
+    final isIndoor = identical(allowedLabels, _indoorAlertLabels);
     final alerts = detections.where((d) {
       final normalized = _normalizeLabelForAlert(d.label);
+      final minConfidence = isIndoor
+          ? (_indoorMinConfidenceByLabel[normalized] ?? _indoorMinConfidence)
+          : _roadMinConfidence;
+      if (d.score < minConfidence) return false;
       if (!allowedLabels.contains(normalized)) return false;
+      if (isIndoor) {
+        final minArea = _indoorMinAreaRatio[normalized];
+        if (minArea != null && d.areaRatio < minArea) return false;
+      }
       if (d.distanceMeters != null) {
-        return d.distanceMeters! <= 10.0;
+        return d.distanceMeters! <= _maxAlertDistance(normalized);
       }
       return d.proximity != 'far';
     }).toList();
@@ -930,12 +1234,36 @@ class _HomeScreenState extends State<HomeScreen>
     return lowered.replaceAll(RegExp(r'[^a-z0-9]+'), '');
   }
 
-  int _urgencyRank(YoloDetection detection) {
+  List<double> _distanceBucketsForLabel(String normalized) {
+    return _distanceBucketsByLabel[normalized] ?? _defaultDistanceBuckets;
+  }
+
+  double _maxAlertDistance(String normalized) {
+    final buckets = _distanceBucketsForLabel(normalized);
+    return buckets[2];
+  }
+
+  String _distanceBucketForDetection(YoloDetection detection) {
+    final normalized = _normalizeLabelForAlert(detection.label);
     final distance = detection.distanceMeters;
     if (distance != null) {
-      if (distance <= 3.0) return 0;
-      if (distance <= 6.0) return 1;
-      if (distance <= 10.0) return 2;
+      final buckets = _distanceBucketsForLabel(normalized);
+      if (distance <= buckets[0]) return 'urgent';
+      if (distance <= buckets[1]) return 'near';
+      if (distance <= buckets[2]) return 'mid';
+      return 'far';
+    }
+    return detection.proximity;
+  }
+
+  int _urgencyRank(YoloDetection detection) {
+    final distance = detection.distanceMeters;
+    final normalized = _normalizeLabelForAlert(detection.label);
+    final buckets = _distanceBucketsForLabel(normalized);
+    if (distance != null) {
+      if (distance <= buckets[0]) return 0;
+      if (distance <= buckets[1]) return 1;
+      if (distance <= buckets[2]) return 2;
       return 3;
     }
     switch (detection.proximity) {
@@ -972,6 +1300,266 @@ class _HomeScreenState extends State<HomeScreen>
     return combined.first;
   }
 
+  YoloDetection? _topByScore(List<YoloDetection> detections) {
+    if (detections.isEmpty) return null;
+    final sorted = [...detections]..sort((a, b) => b.score.compareTo(a.score));
+    return sorted.first;
+  }
+
+  String? _hazardLabelForNormalized(String normalized) {
+    if (_vehicleClassLabels.contains(normalized)) return _vehicleHazardLabel;
+    if (_humanClassLabels.contains(normalized)) return _humanHazardLabel;
+    if (_animalClassLabels.contains(normalized)) return _animalHazardLabel;
+    if (_roadHazardClassLabels.contains(normalized)) return _roadHazardLabel;
+    if (_roadsideClassLabels.contains(normalized)) return _roadsideHazardLabel;
+    return null;
+  }
+
+  List<YoloDetection> _mapRoadDetectionsToHazards(List<YoloDetection> detections) {
+    if (detections.isEmpty) return detections;
+    final mapped = <YoloDetection>[];
+    for (final det in detections) {
+      final normalized = _normalizeLabelForAlert(det.label);
+      final hazardLabel = _hazardLabelForNormalized(normalized);
+      if (hazardLabel == null) continue;
+      if (hazardLabel == det.label) {
+        mapped.add(det);
+      } else {
+        mapped.add(
+          YoloDetection(
+            classId: det.classId,
+            label: hazardLabel,
+            score: det.score,
+            rect: det.rect,
+            areaRatio: det.areaRatio,
+            proximity: det.proximity,
+            distanceMeters: det.distanceMeters,
+          ),
+        );
+      }
+    }
+    return mapped;
+  }
+
+  String _proximityFromAreaRatio(double areaRatio) {
+    if (areaRatio >= 0.2) return 'near';
+    if (areaRatio >= 0.08) return 'mid';
+    return 'far';
+  }
+
+  YoloDetection? _detectDarkPatch(img.Image image) {
+    final width = image.width;
+    final height = image.height;
+    if (width == 0 || height == 0) return null;
+    final int startY = (height * 0.6).toInt();
+    const int step = 4;
+    int darkCount = 0;
+    int total = 0;
+    int minX = width;
+    int minY = height;
+    int maxX = 0;
+    int maxY = 0;
+
+    for (int y = startY; y < height; y += step) {
+      for (int x = 0; x < width; x += step) {
+        final pixel = image.getPixel(x, y);
+        final int r = pixel.r.toInt();
+        final int g = pixel.g.toInt();
+        final int b = pixel.b.toInt();
+        final double gray = 0.299 * r + 0.587 * g + 0.114 * b;
+        total++;
+        if (gray < 65) {
+          darkCount++;
+          if (x < minX) minX = x;
+          if (y < minY) minY = y;
+          if (x > maxX) maxX = x;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+
+    if (total == 0) return null;
+    final double darkRatio = darkCount / total;
+    if (darkRatio < 0.06 || darkRatio > 0.45) return null;
+    if (minX >= maxX || minY >= maxY) return null;
+
+    final rectWidth = (maxX - minX + step).toDouble().clamp(0.0, width.toDouble());
+    final rectHeight = (maxY - minY + step).toDouble().clamp(0.0, height.toDouble());
+    final rect = Rect.fromLTWH(
+      minX.toDouble(),
+      minY.toDouble(),
+      rectWidth,
+      rectHeight,
+    );
+    final areaRatio = (rectWidth * rectHeight) / (width * height);
+    if (areaRatio < 0.01 || areaRatio > 0.5) return null;
+
+    final proximity = _proximityFromAreaRatio(areaRatio);
+    final score = (darkRatio * 3).clamp(0.2, 0.9);
+    return YoloDetection(
+      classId: -1,
+      label: _roadHazardLabel,
+      score: score,
+      rect: rect,
+      areaRatio: areaRatio,
+      proximity: proximity,
+      distanceMeters: null,
+    );
+  }
+
+  String _extractTextFromSignboards(
+    List<RecognizedText> results,
+    List<YoloDetection> signboards,
+  ) {
+    if (results.isEmpty) return '';
+    final rects = _getActiveSignboardRects(signboards);
+    if (rects.isEmpty) return '';
+    final lines = <String>[];
+    final seen = <String>{};
+
+    Rect? bestRectFor(Rect rect, double minOverlap) {
+      Rect? best;
+      double bestOverlap = 0.0;
+      for (final r in rects) {
+        if (!r.overlaps(rect)) continue;
+        final inter = r.intersect(rect);
+        if (inter.isEmpty) continue;
+        final overlap = (inter.width * inter.height) / (rect.width * rect.height);
+        if (overlap > bestOverlap) {
+          bestOverlap = overlap;
+          best = r;
+        }
+      }
+      if (bestOverlap < minOverlap) return null;
+      return best;
+    }
+
+    for (final result in results) {
+      for (final block in result.blocks) {
+        final box = block.boundingBox;
+        if (box == null) continue;
+        final bestRect = bestRectFor(box, 0.35);
+        if (bestRect == null) continue;
+        final heightRatio = box.height / bestRect.height;
+        if (heightRatio < 0.04 || heightRatio > 0.9) continue;
+        final raw = block.text.trim();
+        if (raw.isEmpty) continue;
+        if (!_lineLooksValid(raw)) continue;
+        if (seen.add(raw)) {
+          lines.add(raw);
+        }
+      }
+    }
+    final text = lines.join(' ').trim();
+    return _shortenSignboardText(_cleanSignboardText(text));
+  }
+
+  List<Rect> _getActiveSignboardRects(List<YoloDetection> signboards) {
+    if (signboards.isNotEmpty) {
+      return signboards.map((d) => _expandRect(d.rect, 0.08)).toList();
+    }
+    final now = DateTime.now();
+    if (_signboardLandmark == null) return const [];
+    if (now.difference(_signboardLandmarkAt) > _signboardLandmarkHold) {
+      return const [];
+    }
+    return [_expandRect(_signboardLandmark!, 0.1)];
+  }
+
+  Rect _expandRect(Rect rect, double padRatio) {
+    final frame = _lastFrameSize;
+    if (frame == null) return rect;
+    final padX = rect.width * padRatio;
+    final padY = rect.height * padRatio;
+    final left = (rect.left - padX).clamp(0.0, frame.width);
+    final top = (rect.top - padY).clamp(0.0, frame.height);
+    final right = (rect.right + padX).clamp(0.0, frame.width);
+    final bottom = (rect.bottom + padY).clamp(0.0, frame.height);
+    return Rect.fromLTRB(left, top, right, bottom);
+  }
+
+  void _updateSignboardLandmark(Rect rect) {
+    final now = DateTime.now();
+    if (_signboardLandmark == null) {
+      _signboardLandmark = rect;
+      _signboardLandmarkAt = now;
+      _signboardLandmarkStreak = 1;
+      return;
+    }
+    final current = _signboardLandmark!;
+    final blended = Rect.lerp(current, rect, _signboardLandmarkSmoothing) ?? rect;
+    _signboardLandmark = blended;
+    _signboardLandmarkAt = now;
+    _signboardLandmarkStreak += 1;
+  }
+
+  String _shortenSignboardText(String text) {
+    if (text.isEmpty) return text;
+    final cleaned = text.replaceAll(RegExp(r'\s+'), ' ').trim();
+    final words = cleaned.split(' ');
+    if (words.length <= 8) return cleaned;
+    return words.take(8).join(' ');
+  }
+
+  String _cleanSignboardText(String text) {
+    if (text.isEmpty) return text;
+    final parts = text.split(RegExp(r'\s+'));
+    final kept = <String>[];
+    for (final part in parts) {
+      if (_tokenLooksValid(part)) {
+        kept.add(part);
+      }
+    }
+    return kept.join(' ').trim();
+  }
+
+  bool _lineLooksValid(String text) {
+    final cleaned = text.replaceAll(RegExp(r'[^A-Za-z0-9\u0900-\u097F]'), '');
+    if (cleaned.length < 2) return false;
+    final ratio = cleaned.length / text.length;
+    if (ratio < 0.45) return false;
+    return true;
+  }
+
+  bool _tokenLooksValid(String token) {
+    if (token.length < 2) return false;
+    final cleaned = token.replaceAll(RegExp(r'[^A-Za-z0-9\u0900-\u097F]'), '');
+    if (cleaned.length < 2) return false;
+    final nonWord = token.replaceAll(RegExp(r'[A-Za-z0-9\u0900-\u097F]'), '');
+    final noiseRatio = nonWord.length / token.length;
+    if (noiseRatio > 0.5) return false;
+    if (RegExp(r'^(.)\1{3,}$').hasMatch(cleaned)) return false;
+    return true;
+  }
+
+  String _buildSignboardMessage(String text, YoloDetection detection) {
+    final direction = _directionForRect(detection.rect);
+    final distanceWord = _distanceDescriptor(detection);
+    final directionPhrase = direction == 'ahead' ? 'ahead' : 'on your $direction';
+    if (_selectedLanguage == 'Hindi') {
+      final hindiDirection = _hindiDirection(direction);
+      final hindiDistance = _hindiDistanceDescriptor(detection, direction);
+      return 'साइनबोर्ड: $text, $hindiDistance $hindiDirection है।';
+    }
+    return 'Signboard: $text, $distanceWord $directionPhrase.';
+  }
+
+  Future<void> _speakSignboard(String text, YoloDetection detection) async {
+    if (!_soundEnabled) return;
+    if (_voiceAssistant.isListening.value || _voiceAssistant.isSpeaking.value) return;
+    final normalized = _normalizeText(text);
+    final now = DateTime.now();
+    if (normalized.isEmpty) return;
+    if (normalized == _lastSignboardText &&
+        now.difference(_lastSignboardSpokenAt) < _signboardSpeakCooldown) {
+      return;
+    }
+    _lastSignboardText = normalized;
+    _lastSignboardSpokenAt = now;
+    final message = _buildSignboardMessage(text, detection);
+    await _voiceAssistant.speak(message);
+  }
+
   String _directionForRect(Rect rect) {
     final frame = _lastFrameSize;
     if (frame == null || frame.width <= 0) return 'ahead';
@@ -983,10 +1571,12 @@ class _HomeScreenState extends State<HomeScreen>
 
   String _distanceDescriptor(YoloDetection detection) {
     final distance = detection.distanceMeters;
+    final normalized = _normalizeLabelForAlert(detection.label);
+    final buckets = _distanceBucketsForLabel(normalized);
     if (distance != null) {
-      if (distance <= 3.0) return 'very close';
-      if (distance <= 6.0) return 'nearby';
-      if (distance <= 10.0) return 'ahead';
+      if (distance <= buckets[0]) return 'very close';
+      if (distance <= buckets[1]) return 'nearby';
+      if (distance <= buckets[2]) return 'ahead';
       return 'far';
     }
     switch (detection.proximity) {
@@ -1014,6 +1604,9 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   String _buildAlertMessage(YoloDetection detection) {
+    if (_selectedLanguage == 'Hindi') {
+      return _buildHindiAlertMessage(detection);
+    }
     final normalized = _normalizeLabelForAlert(detection.label);
     final spokenLabel = _alertSpokenLabels[normalized] ?? _humanizeLabel(detection.label);
     final direction = _directionForRect(detection.rect);
@@ -1028,10 +1621,131 @@ class _HomeScreenState extends State<HomeScreen>
     return '$base $guidance';
   }
 
+  List<YoloDetection> _scaleDetectionsToFrame(
+    List<YoloDetection> detections,
+    img.Image rgbImage,
+  ) {
+    final frame = _lastFrameSize;
+    if (frame == null || frame.width <= 0 || frame.height <= 0) return detections;
+    final scaleX = frame.width / rgbImage.width;
+    final scaleY = frame.height / rgbImage.height;
+    if ((scaleX - 1.0).abs() < 0.01 && (scaleY - 1.0).abs() < 0.01) {
+      return detections;
+    }
+    return detections
+        .map(
+          (d) => YoloDetection(
+            classId: d.classId,
+            label: d.label,
+            score: d.score,
+            rect: Rect.fromLTRB(
+              d.rect.left * scaleX,
+              d.rect.top * scaleY,
+              d.rect.right * scaleX,
+              d.rect.bottom * scaleY,
+            ),
+            areaRatio: d.areaRatio,
+            proximity: d.proximity,
+            distanceMeters: d.distanceMeters,
+          ),
+        )
+        .toList();
+  }
+
+  YoloDetection _copyDetectionWithRect(YoloDetection detection, Rect rect) {
+    return YoloDetection(
+      classId: detection.classId,
+      label: detection.label,
+      score: detection.score,
+      rect: rect,
+      areaRatio: detection.areaRatio,
+      proximity: detection.proximity,
+      distanceMeters: detection.distanceMeters,
+    );
+  }
+
+  YoloDetection? _fallbackSignboardDetection(Rect rect) {
+    final base = _lastSignboardDetection;
+    if (base != null) return _copyDetectionWithRect(base, rect);
+    final frame = _lastFrameSize;
+    if (frame == null || frame.width <= 0 || frame.height <= 0) return null;
+    final areaRatio = (rect.width * rect.height) / (frame.width * frame.height);
+    final proximity = _proximityFromAreaRatio(areaRatio);
+    return YoloDetection(
+      classId: 0,
+      label: 'signboard',
+      score: 1.0,
+      rect: rect,
+      areaRatio: areaRatio,
+      proximity: proximity,
+      distanceMeters: null,
+    );
+  }
+
+  String _buildHindiAlertMessage(YoloDetection detection) {
+    final normalized = _normalizeLabelForAlert(detection.label);
+    final label = _hindiLabels[normalized] ?? _humanizeLabel(detection.label);
+    final direction = _directionForRect(detection.rect);
+    final distanceWord = _hindiDistanceDescriptor(detection, direction);
+    final directionPhrase = _hindiDirection(direction);
+    final guidance = _hindiGuidance[normalized];
+    final base = '$label $distanceWord $directionPhrase है।';
+    if (guidance == null) return base;
+    return '$base $guidance';
+  }
+
+  String _hindiDirection(String direction) {
+    switch (direction) {
+      case 'left':
+        return 'बाईं ओर';
+      case 'right':
+        return 'दाईं ओर';
+      default:
+        return 'सामने';
+    }
+  }
+
+  String _hindiDistanceDescriptor(YoloDetection detection, String direction) {
+    final distance = detection.distanceMeters;
+    final normalized = _normalizeLabelForAlert(detection.label);
+    final buckets = _distanceBucketsForLabel(normalized);
+    String word;
+    if (distance != null) {
+      if (distance <= buckets[0]) {
+        word = 'बहुत पास';
+      } else if (distance <= buckets[1]) {
+        word = 'पास';
+      } else if (distance <= buckets[2]) {
+        word = 'आगे';
+      } else {
+        word = 'दूर';
+      }
+    } else {
+      switch (detection.proximity) {
+        case 'urgent':
+          word = 'बहुत पास';
+          break;
+        case 'near':
+          word = 'पास';
+          break;
+        case 'mid':
+          word = 'आगे';
+          break;
+        default:
+          word = 'दूर';
+      }
+    }
+    if (direction != 'ahead' && word == 'आगे') {
+      word = 'पास';
+    }
+    return word;
+  }
+
   String _alertKey(YoloDetection detection) {
     final normalized = _normalizeLabelForAlert(detection.label);
     final direction = _directionForRect(detection.rect);
-    return '$normalized:${detection.proximity}:$direction';
+    final bucket = _distanceBucketForDetection(detection);
+    return '$normalized:$bucket:$direction';
   }
 
   Future<void> _maybeSpeakAlerts() async {
@@ -1042,8 +1756,26 @@ class _HomeScreenState extends State<HomeScreen>
 
     final roadAlerts = _filterAlertDetections(_latestDetections, _roadAlertLabels);
     final indoorAlerts = _filterAlertDetections(_latestIndoorDetections, _indoorAlertLabels);
+    final seenNow = <String>{};
+    for (final det in [...roadAlerts, ...indoorAlerts]) {
+      seenNow.add(_normalizeLabelForAlert(det.label));
+    }
+    for (final label in _alertStreaks.keys.toList()) {
+      if (!seenNow.contains(label)) {
+        _alertStreaks[label] = 0;
+      }
+    }
+    for (final label in seenNow) {
+      final current = _alertStreaks[label] ?? 0;
+      _alertStreaks[label] = current + 1;
+    }
+
     final candidate = _pickMostUrgentAlert(roadAlerts, indoorAlerts);
     if (candidate == null) return;
+    final candidateLabel = _normalizeLabelForAlert(candidate.label);
+    if ((_alertStreaks[candidateLabel] ?? 0) < _alertStreakTarget) {
+      return;
+    }
 
     final message = _buildAlertMessage(candidate);
     if (message.trim().isEmpty) return;
@@ -1086,8 +1818,12 @@ class _HomeScreenState extends State<HomeScreen>
         _devanagariTextRecognizer.processImage(inputImage),
         _tamilTextRecognizer.processImage(inputImage),
       ]);
+      final ocrResults = results;
       final mergedText = _mergeRecognizedText(results);
-      _handleOcrResult(mergedText, image);
+      _updateOcrPreview(mergedText);
+      if (!_signboardReady) {
+        _handleOcrResult(mergedText, image);
+      }
 
       final bool shouldRunRoad = _yoloReady &&
           !_yoloInFlight &&
@@ -1097,6 +1833,10 @@ class _HomeScreenState extends State<HomeScreen>
           !_indoorInFlight &&
           _frameIndex % _indoorFrameStride == _indoorFrameOffset &&
           now.difference(_lastIndoorTime) > _yoloInterval;
+      final bool shouldRunSignboard = _signboardReady &&
+          !_signboardInFlight &&
+          _frameIndex % _signboardFrameStride == _signboardFrameOffset &&
+          now.difference(_lastSignboardTime) > _signboardInterval;
       if (shouldRunRoad) {
         _yoloInFlight = true;
         _lastYoloTime = now;
@@ -1105,44 +1845,134 @@ class _HomeScreenState extends State<HomeScreen>
         _indoorInFlight = true;
         _lastIndoorTime = now;
       }
+      if (shouldRunSignboard) {
+        _signboardInFlight = true;
+        _lastSignboardTime = now;
+      }
       bool shouldSpeakAlerts = false;
-      if (shouldRunRoad || shouldRunIndoor) {
+      if (shouldRunRoad || shouldRunIndoor || shouldRunSignboard) {
         final rgbImage = _buildRgbImageForYolo(image);
         if (rgbImage != null) {
           if (shouldRunRoad) {
-            final detections = await _yoloDetector.detect(rgbImage);
-            if (mounted) {
-              setState(() {
-                _latestDetections = detections;
-              });
+            try {
+              final detections = await _yoloDetector.detect(rgbImage);
+              final scaledDetections = _scaleDetectionsToFrame(detections, rgbImage);
+              final darkPatch = _detectDarkPatch(rgbImage);
+              final scaledDarkPatch = darkPatch == null
+                  ? null
+                  : _scaleDetectionsToFrame([darkPatch], rgbImage).first;
+              final combined = <YoloDetection>[
+                ...scaledDetections,
+                if (scaledDarkPatch != null) scaledDarkPatch,
+              ];
+              final mappedDetections = _mapRoadDetectionsToHazards(combined);
+              if (mounted) {
+                setState(() {
+                  _latestDetections = mappedDetections;
+                  _yoloError = null;
+                });
+              }
+              shouldSpeakAlerts = true;
+            } catch (error) {
+              debugPrint('YOLO road error: $error');
+              if (mounted) {
+                setState(() {
+                  _yoloError = 'Detector error: ${error.toString()}';
+                });
+              }
+            } finally {
+              _yoloInFlight = false;
             }
-            shouldSpeakAlerts = true;
           }
           if (shouldRunIndoor) {
-            final detections = await _indoorDetector.detect(
-              rgbImage,
-              confThreshold: 0.25,
-            );
-            if (mounted) {
-              setState(() {
-                _latestIndoorDetections = detections;
-              });
+            try {
+              final detections = await _indoorDetector.detect(
+                rgbImage,
+                confThreshold: 0.35,
+              );
+              final scaledDetections = _scaleDetectionsToFrame(detections, rgbImage);
+              if (mounted) {
+                setState(() {
+                  _latestIndoorDetections = scaledDetections;
+                  _indoorError = null;
+                });
+              }
+              shouldSpeakAlerts = true;
+            } catch (error) {
+              debugPrint('YOLO indoor error: $error');
+              if (mounted) {
+                setState(() {
+                  _indoorError = 'Indoor detector error: ${error.toString()}';
+                });
+              }
+            } finally {
+              _indoorInFlight = false;
             }
-            shouldSpeakAlerts = true;
           }
-        }
-        if (shouldRunRoad) {
-          _yoloInFlight = false;
-        }
-        if (shouldRunIndoor) {
-          _indoorInFlight = false;
+          if (shouldRunSignboard) {
+            try {
+              final detections = await _signboardDetector.detect(
+                rgbImage,
+                confThreshold: 0.3,
+              );
+              final scaledDetections = _scaleDetectionsToFrame(detections, rgbImage);
+              if (mounted) {
+                setState(() {
+                  _latestSignboardDetections = scaledDetections;
+                  _signboardError = null;
+                });
+              }
+              YoloDetection? speakTarget;
+              List<YoloDetection> rectSources = scaledDetections;
+              if (scaledDetections.isNotEmpty) {
+                final sorted = [...scaledDetections]
+                  ..sort((a, b) => b.score.compareTo(a.score));
+                final top = sorted.first;
+                _lastSignboardDetection = top;
+                _updateSignboardLandmark(top.rect);
+                speakTarget = top;
+                rectSources = sorted;
+              }
+              final text = _extractTextFromSignboards(ocrResults, rectSources);
+              if (text.isNotEmpty) {
+                if (mounted) {
+                  setState(() {
+                    _latestOcrText = text;
+                    _latestSmartText = text;
+                    _latestSmartEmpty = false;
+                    _latestGeminiError = null;
+                  });
+                }
+                final landmarkRect = _signboardLandmark;
+                if (speakTarget == null && landmarkRect != null) {
+                  speakTarget = _fallbackSignboardDetection(landmarkRect);
+                }
+                if (speakTarget != null) {
+                  await _speakSignboard(text, speakTarget);
+                }
+              }
+            } catch (error) {
+              debugPrint('YOLO signboard error: $error');
+              if (mounted) {
+                setState(() {
+                  _signboardError = 'Signboard detector error: ${error.toString()}';
+                });
+              }
+            } finally {
+              _signboardInFlight = false;
+            }
+          }
+        } else {
+          if (shouldRunRoad) _yoloInFlight = false;
+          if (shouldRunIndoor) _indoorInFlight = false;
+          if (shouldRunSignboard) _signboardInFlight = false;
         }
         if (shouldSpeakAlerts) {
           unawaited(_maybeSpeakAlerts());
         }
       }
     } catch (error) {
-      debugPrint('OCR error: $error');
+      debugPrint('Frame processing error: $error');
     } finally {
       _isProcessingFrame = false;
     }
@@ -1293,7 +2123,20 @@ class _HomeScreenState extends State<HomeScreen>
     unawaited(_maybeSendToGemini(cleaned, image));
   }
 
+  void _updateOcrPreview(String text) {
+    final cleaned = text.trim();
+    if (cleaned.isEmpty) return;
+    if (mounted) {
+      setState(() {
+        _latestOcrText = cleaned;
+      });
+    }
+  }
+
   Future<void> _maybeSendToGemini(String text, CameraImage image) async {
+    if (_signboardReady) {
+      return;
+    }
     if (_geminiInFlight) return;
     if (!_geminiService.hasApiKey) {
       debugPrint('GEMINI_API_KEY not set. Skipping Gemini.');

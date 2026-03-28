@@ -1,1 +1,7 @@
-road
+drivable
+non_drivable
+living
+vehicle
+roadside
+far
+sky
