@@ -49,7 +49,6 @@ Return ONLY strict JSON: {"speak":"...","action":null} or {"speak":"...","action
     final languageHint = (preferredLanguage == null || preferredLanguage!.trim().isEmpty)
         ? 'Auto'
         : preferredLanguage!.trim();
-
     final prompt = '''
 OCR TEXT:
 $ocrText

@@ -1,8 +1,20 @@
+import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:image/image.dart' as img;
 import 'package:permission_handler/permission_handler.dart';
 
+import '../config/config.dart';
 import '../services/voice_assistant_service.dart';
 import '../services/gemini_service.dart';
+import '../services/yolo_detector_service.dart';
 
 enum HomeState { idle, permission, scanning }
 
@@ -34,34 +46,136 @@ class _HomeScreenState extends State<HomeScreen>
   late final TextRecognizer _latinTextRecognizer;
   late final TextRecognizer _devanagariTextRecognizer;
   late final TextRecognizer _tamilTextRecognizer;
+  late final YoloDetectorService _yoloDetector;
+  late final YoloDetectorService _indoorDetector;
 
   bool _isProcessingFrame = false;
-  bool _isCapturing = false;
-  DateTime _lastCaptureTime = DateTime.fromMillisecondsSinceEpoch(0);
-  Rect? _lastFocusRect;
-  DateTime _focusStableSince = DateTime.fromMillisecondsSinceEpoch(0);
-  bool _detectedAnnounced = false;
+  bool _yoloReady = false;
+  bool _yoloInFlight = false;
+  String? _yoloError;
+  List<YoloDetection> _latestDetections = [];
+  bool _indoorReady = false;
+  bool _indoorInFlight = false;
+  String? _indoorError;
+  List<YoloDetection> _latestIndoorDetections = [];
   DateTime _lastAnalysisTime = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastYoloTime = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastIndoorTime = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastEmitTime = DateTime.fromMillisecondsSinceEpoch(0);
+  String _lastEmittedText = '';
   String _latestOcrText = '';
   String _latestSmartText = '';
   String? _latestGeminiError;
-  DateTime _lastGuidanceTime = DateTime.fromMillisecondsSinceEpoch(0);
-  String _lastGuidanceText = '';
-  String _currentGuidanceText = '';
-  bool _holdAnnounced = false;
   DateTime _lastSpokenTime = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastSpokenText = '';
   DateTime _lastGeminiCall = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastGeminiText = '';
   bool _geminiInFlight = false;
   bool _latestSmartEmpty = false;
+  bool _isCapturing = false;
+  DateTime _lastCaptureTime = DateTime.fromMillisecondsSinceEpoch(0);
+  Rect? _lastFocusRect;
+  DateTime _focusStableSince = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _detectedAnnounced = false;
+  DateTime _lastGuidanceTime = DateTime.fromMillisecondsSinceEpoch(0);
+  String _lastGuidanceText = '';
+  String _currentGuidanceText = '';
+  bool _holdAnnounced = false;
+  Size? _lastFrameSize;
+  DateTime _lastAlertSpokenAt = DateTime.fromMillisecondsSinceEpoch(0);
+  String _lastAlertKey = '';
 
   static const Duration _analysisInterval = Duration(milliseconds: 500);
+  static const Duration _emitCooldown = Duration(milliseconds: 1500);
   static const Duration _speechCooldown = Duration(seconds: 4);
-  static const Duration _captureHoldDuration = Duration(milliseconds: 1000);
+  static const Duration _alertSpeakCooldown = Duration(seconds: 4);
+  static const Duration _geminiCooldown = Duration(seconds: 6);
+  static const Duration _captureHoldDuration = Duration(milliseconds: 900);
   static const Duration _captureCooldown = Duration(seconds: 5);
-  static const Duration _geminiCooldown = Duration(seconds: 8);
   static const Duration _guidanceCooldown = Duration(seconds: 2);
+  static const double _centerTolerance = 0.12;
+  static const Duration _yoloInterval = Duration(milliseconds: 900);
+  static const int _yoloFrameStride = 4;
+  static const int _indoorFrameStride = 4;
+  static const int _indoorFrameOffset = 2;
+  int _frameIndex = 0;
+
+  static const Set<String> _roadAlertLabels = {
+    'car',
+    'truck',
+    'bus',
+    'motorcycle',
+    'bicycle',
+    'person',
+    'pothole',
+    'speedbump',
+    'bump',
+    'barricade',
+    'barrier',
+    'construction',
+    'cone',
+    'pole',
+    'electricpole',
+    'powerpole',
+    'streetlight',
+    'stair',
+    'stairs',
+    'road',
+    'rickshaw',
+    'autorickshaw',
+    'scooter',
+  };
+
+  static const Set<String> _indoorAlertLabels = {
+    'door',
+    'openeddoor',
+    'cabinetdoor',
+    'refrigeratordoor',
+    'window',
+    'pole',
+    'stair',
+    'stairs',
+  };
+
+  static const Map<String, String> _alertSpokenLabels = {
+    'openeddoor': 'open door',
+    'cabinetdoor': 'cabinet door',
+    'refrigeratordoor': 'refrigerator door',
+    'electricpole': 'electric pole',
+    'powerpole': 'electric pole',
+    'streetlight': 'street light',
+    'autorickshaw': 'auto rickshaw',
+    'rickshaw': 'rickshaw',
+    'speedbump': 'speed bump',
+  };
+
+  static const Map<String, String> _alertGuidance = {
+    'car': 'Keep left.',
+    'truck': 'Keep left.',
+    'bus': 'Keep left.',
+    'motorcycle': 'Keep left.',
+    'bicycle': 'Keep left.',
+    'autorickshaw': 'Keep left.',
+    'rickshaw': 'Keep left.',
+    'scooter': 'Keep left.',
+    'pothole': 'Watch your step.',
+    'speedbump': 'Slow down.',
+    'bump': 'Slow down.',
+    'barricade': 'Change lane carefully.',
+    'barrier': 'Change lane carefully.',
+    'construction': 'Change lane carefully.',
+    'cone': 'Change lane carefully.',
+    'stair': 'Step carefully.',
+    'stairs': 'Step carefully.',
+    'door': 'Mind the doorway.',
+    'openeddoor': 'Mind the doorway.',
+    'cabinetdoor': 'Mind the doorway.',
+    'refrigeratordoor': 'Mind the doorway.',
+    'pole': 'Obstacle ahead.',
+    'electricpole': 'Obstacle ahead.',
+    'powerpole': 'Obstacle ahead.',
+    'streetlight': 'Obstacle ahead.',
+  };
 
   static const Map<DeviceOrientation, int> _deviceRotation = {
     DeviceOrientation.portraitUp: 0,
@@ -81,6 +195,18 @@ class _HomeScreenState extends State<HomeScreen>
     _voiceAssistant = VoiceAssistantService(enableSpeech: true);
     _geminiService = GeminiService();
     unawaited(_voiceAssistant.initialize(localeId: 'en_IN'));
+    _yoloDetector = YoloDetectorService(
+      modelAsset: YOLO_MODEL_ASSET,
+      labelsAsset: COCO_LABELS_ASSET,
+      inputSize: 640,
+    );
+    unawaited(_initializeYolo());
+    _indoorDetector = YoloDetectorService(
+      modelAsset: INDOOR_YOLO_MODEL_ASSET,
+      labelsAsset: INDOOR_LABELS_ASSET,
+      inputSize: 640,
+    );
+    unawaited(_initializeIndoorYolo());
 
     _micPulseController = AnimationController(
       vsync: this,
@@ -112,6 +238,8 @@ class _HomeScreenState extends State<HomeScreen>
     _voiceAssistant.isListening.removeListener(_micListeningListener);
     _micPulseController.dispose();
     unawaited(_voiceAssistant.dispose());
+    unawaited(_yoloDetector.dispose());
+    unawaited(_indoorDetector.dispose());
     super.dispose();
   }
 
@@ -129,69 +257,61 @@ class _HomeScreenState extends State<HomeScreen>
 
   @override
   Widget build(BuildContext context) {
-    final bool isScanning = _currentState == HomeState.scanning;
-    final String statusText = _cameraError != null
-        ? _cameraError!
-        : _isCapturing
-            ? 'Reading signboard...'
-            : isScanning
-                ? (_cameraReady ? 'Scanning for signboards...' : 'Starting camera...')
-                : 'Ready to scan';
-
     return Scaffold(
       backgroundColor: Colors.white,
       body: SafeArea(
         child: Stack(
           children: [
-            Positioned.fill(child: _buildCameraPreview()),
-            if (!isScanning || _cameraError != null) _buildPermissionOverlay(),
-            Positioned(
-              top: 16,
-              left: 16,
-              right: 16,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _buildVoiceOverlay(),
-                  if (_currentGuidanceText.isNotEmpty) ...[
-                    const SizedBox(height: 12),
-                    _buildGuidanceOverlay(),
-                  ],
-                  if (_latestGeminiError != null ||
-                      _latestSmartText.isNotEmpty ||
-                      _latestOcrText.isNotEmpty) ...[
-                    const SizedBox(height: 12),
-                    _buildSmartOverlay(),
-                  ],
-                ],
-              ),
-            ),
+            _buildMainContent(),
+            _buildDetectionOverlay(),
             _buildTopRightSettings(),
             _buildBottomRightSOS(),
-            Positioned(
-              bottom: 24,
-              left: 24,
-              right: 24,
-              child: Center(
-                child: Container(
-                  height: 64, // max 80dp
-                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.7),
-                    borderRadius: BorderRadius.circular(32),
-                  ),
-                  child: Center(
-                    child: Text(
-                      statusText,
-                      style: GoogleFonts.outfit(
-                        fontSize: 20,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ),
-                ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMainContent() {
+    switch (_currentState) {
+      case HomeState.idle:
+        return _buildPermissionState();
+      case HomeState.permission:
+        return _buildPermissionState();
+      case HomeState.scanning:
+        return _buildScanningState();
+    }
+  }
+
+  Widget _buildIdleState() {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () {
+        // Typically check permission here. For now, go to permission.
+        setState(() => _currentState = HomeState.permission);
+      },
+      child: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              'Tap anywhere to start',
+              style: GoogleFonts.outfit(
+                fontSize: 32,
+                fontWeight: FontWeight.w700,
+                color: const Color(0xFF1A1A1A), // High contrast dark text
               ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'DrishtiAI is ready.',
+              style: GoogleFonts.outfit(
+                fontSize: 24,
+                fontWeight: FontWeight.w500,
+                color: const Color(0xFF4A4A4A),
+              ),
+              textAlign: TextAlign.center,
             ),
           ],
         ),
@@ -199,65 +319,114 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
-  Widget _buildPermissionOverlay() {
-    final bool hasError = _cameraError != null && _cameraError!.isNotEmpty;
-    final String message = hasError
-        ? _cameraError!
-        : 'Grant camera access to start scanning signboards.';
-    final String buttonLabel = hasError ? 'Retry' : 'Grant Access';
-
+  Widget _buildPermissionState() {
     return Center(
-      child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 24),
-        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
-        decoration: BoxDecoration(
-          color: Colors.white.withValues(alpha: 0.92),
-          borderRadius: BorderRadius.circular(24),
-          boxShadow: const [
-            BoxShadow(color: Colors.black26, blurRadius: 18, offset: Offset(0, 10)),
-          ],
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.visibility, color: hasError ? const Color(0xFFCC0000) : const Color(0xFF1A1A1A), size: 36),
-            const SizedBox(height: 12),
-            Text(
-              'Welcome to DrishtiAI',
-              textAlign: TextAlign.center,
-              style: GoogleFonts.outfit(
-                fontSize: 22,
-                fontWeight: FontWeight.w700,
-                color: const Color(0xFF1A1A1A),
-              ),
+      child: Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: Card(
+          elevation: 4,
+          color: Colors.white,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 32.0, horizontal: 24.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.camera_alt_rounded, size: 48, color: Color(0xFF1A56DB)),
+                const SizedBox(height: 16),
+                Text(
+                  'Camera Access',
+                  style: GoogleFonts.outfit(fontSize: 24, fontWeight: FontWeight.bold, color: const Color(0xFF1A1A1A)),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  'DrishtiAI needs access to your camera to read signboards.',
+                  style: GoogleFonts.outfit(fontSize: 18, color: const Color(0xFF4A4A4A)),
+                  textAlign: TextAlign.center,
+                ),
+                if (_cameraError != null) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    _cameraError!,
+                    style: GoogleFonts.outfit(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                      color: const Color(0xFFCC0000),
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+                const SizedBox(height: 32),
+                ElevatedButton(
+                  onPressed: _startOcrPipeline,
+                  child: const Text('Grant Access', style: TextStyle(fontSize: 20)),
+                ),
+              ],
             ),
-            const SizedBox(height: 8),
-            Text(
-              message,
-              textAlign: TextAlign.center,
-              style: GoogleFonts.outfit(
-                fontSize: 16,
-                fontWeight: FontWeight.w500,
-                color: hasError ? const Color(0xFFB00020) : const Color(0xFF4A4A4A),
-              ),
-            ),
-            const SizedBox(height: 16),
-            ElevatedButton(
-              onPressed: _startOcrPipeline,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF1A1A1A),
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 12),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-              ),
-              child: Text(
-                buttonLabel,
-                style: GoogleFonts.outfit(fontSize: 16, fontWeight: FontWeight.w600),
-              ),
-            ),
-          ],
+          ),
         ),
       ),
+    );
+  }
+
+  Widget _buildScanningState() {
+    final statusText = _cameraError != null
+        ? 'Camera error'
+        : !_cameraReady
+            ? 'Starting camera...'
+            : 'Reading signboards...';
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        _buildCameraPreview(),
+        Positioned(
+          bottom: 100,
+          left: 24,
+          right: 24,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (_currentGuidanceText.isNotEmpty) ...[
+                _buildGuidanceOverlay(),
+                const SizedBox(height: 12),
+              ],
+              _buildVoiceOverlay(),
+              if (_latestGeminiError != null || _latestSmartText.isNotEmpty || _latestOcrText.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                _buildSmartOverlay(),
+              ],
+            ],
+          ),
+        ),
+        // Status Pill
+        Positioned(
+          bottom: 24,
+          left: 24,
+          right: 24,
+          child: Center(
+            child: Container(
+              height: 64, // max 80dp
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.7),
+                borderRadius: BorderRadius.circular(32),
+              ),
+              child: Center(
+                child: Text(
+                  statusText,
+                  style: GoogleFonts.outfit(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.white,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -274,6 +443,57 @@ class _HomeScreenState extends State<HomeScreen>
     return CameraPreview(controller);
   }
 
+  Widget _buildOcrOverlay() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.7),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Text(
+        _latestOcrText,
+        maxLines: 4,
+        overflow: TextOverflow.ellipsis,
+        style: GoogleFonts.outfit(
+          fontSize: 16,
+          fontWeight: FontWeight.w600,
+          color: Colors.white,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildGuidanceOverlay() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.8),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: const Color(0xFFB3D4FF).withValues(alpha: 0.9),
+          width: 1,
+        ),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.center_focus_strong, color: Color(0xFFB3D4FF), size: 20),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              _currentGuidanceText,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: GoogleFonts.outfit(
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+                color: Colors.white,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _buildVoiceOverlay() {
     return ValueListenableBuilder<bool>(
@@ -346,35 +566,6 @@ class _HomeScreenState extends State<HomeScreen>
           },
         );
       },
-    );
-  }
-
-  Widget _buildGuidanceOverlay() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.75),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFFB3D4FF).withValues(alpha: 0.9), width: 1),
-      ),
-      child: Row(
-        children: [
-          const Icon(Icons.center_focus_strong, color: Color(0xFFB3D4FF), size: 22),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              _currentGuidanceText,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: GoogleFonts.outfit(
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
-                color: Colors.white,
-              ),
-            ),
-          ),
-        ],
-      ),
     );
   }
 
@@ -464,7 +655,7 @@ class _HomeScreenState extends State<HomeScreen>
       );
       final controller = CameraController(
         selectedCamera,
-        ResolutionPreset.high,
+        ResolutionPreset.medium,
         enableAudio: false,
         imageFormatGroup: Platform.isIOS ? ImageFormatGroup.bgra8888 : ImageFormatGroup.yuv420,
       );
@@ -490,6 +681,56 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
+  Future<void> _initializeYolo() async {
+    if (kIsWeb) {
+      if (mounted) {
+        setState(() {
+          _yoloError = 'On-device detection is not available on web.';
+        });
+      }
+      return;
+    }
+    try {
+      await _yoloDetector.initialize();
+      if (!mounted) return;
+      setState(() {
+        _yoloReady = true;
+        _yoloError = null;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _yoloReady = false;
+        _yoloError = 'Detector init failed: ${error.toString()}';
+      });
+    }
+  }
+
+  Future<void> _initializeIndoorYolo() async {
+    if (kIsWeb) {
+      if (mounted) {
+        setState(() {
+          _indoorError = 'On-device detection is not available on web.';
+        });
+      }
+      return;
+    }
+    try {
+      await _indoorDetector.initialize();
+      if (!mounted) return;
+      setState(() {
+        _indoorReady = true;
+        _indoorError = null;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _indoorReady = false;
+        _indoorError = 'Indoor detector init failed: ${error.toString()}';
+      });
+    }
+  }
+
   void _stopCamera() {
     final controller = _cameraController;
     if (controller == null) return;
@@ -503,10 +744,14 @@ class _HomeScreenState extends State<HomeScreen>
         _latestSmartText = '';
         _latestSmartEmpty = false;
         _latestGeminiError = null;
+        _lastFocusRect = null;
         _focusStableSince = DateTime.fromMillisecondsSinceEpoch(0);
         _detectedAnnounced = false;
+        _lastGuidanceTime = DateTime.fromMillisecondsSinceEpoch(0);
+        _lastGuidanceText = '';
+        _currentGuidanceText = '';
+        _holdAnnounced = false;
       });
-      _lastFocusRect = null;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         unawaited(_disposeController(controller));
       });
@@ -518,32 +763,6 @@ class _HomeScreenState extends State<HomeScreen>
     unawaited(_disposeController(controller));
   }
 
-  Rect? _mergeBoundingBoxes(List<RecognizedText> results) {
-    Rect? merged;
-    for (final result in results) {
-      for (final block in result.blocks) {
-        final box = block.boundingBox;
-        merged = merged == null ? box : merged.expandToInclude(box);
-      }
-    }
-    return merged;
-  }
-
-  Rect? _largestTextRect(List<RecognizedText> results) {
-    Rect? best;
-    double bestArea = 0;
-    for (final result in results) {
-      for (final block in result.blocks) {
-        final box = block.boundingBox;
-        final area = box.width * box.height;
-        if (area > bestArea) {
-          bestArea = area;
-          best = box;
-        }
-      }
-    }
-    return best;
-  }
   Widget _buildSmartOverlay() {
     final hasError = _latestGeminiError != null && _latestGeminiError!.isNotEmpty;
     final hasSmart = _latestSmartText.isNotEmpty;
@@ -560,10 +779,6 @@ class _HomeScreenState extends State<HomeScreen>
       title = 'Smart reading';
       body = _latestSmartText;
       accentColor = const Color(0xFFB6F3C2);
-    } else if (_isCapturing) {
-      title = 'Reading signboard...';
-      body = 'Hold steady while I capture the text.';
-      accentColor = const Color(0xFFB3D4FF);
     } else if (_latestSmartEmpty) {
       title = 'No useful text found yet';
       body = 'Try moving closer or centering the signboard.';
@@ -623,6 +838,287 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
+  Widget _buildDetectionCard({
+    required String title,
+    required String body,
+    required Color accentColor,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.75),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: accentColor.withValues(alpha: 0.9), width: 1),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            title,
+            style: GoogleFonts.outfit(
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              color: accentColor,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            body,
+            style: GoogleFonts.outfit(
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              color: Colors.white,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDetectionOverlay() {
+    if (_currentState != HomeState.scanning) {
+      return const SizedBox.shrink();
+    }
+    final roadAlerts = _filterAlertDetections(_latestDetections, _roadAlertLabels);
+    final indoorAlerts =
+        _filterAlertDetections(_latestIndoorDetections, _indoorAlertLabels);
+    String roadTitle;
+    String roadBody;
+    Color roadAccentColor;
+
+    if (_yoloError != null) {
+      roadTitle = 'Object detection unavailable';
+      roadBody = _yoloError!;
+      roadAccentColor = const Color(0xFFFFA3A3);
+    } else if (!_yoloReady) {
+      roadTitle = 'Loading detector...';
+      roadBody = 'Preparing road model.';
+      roadAccentColor = const Color(0xFFB3D4FF);
+    } else if (roadAlerts.isEmpty) {
+      roadTitle = 'No road alerts';
+      roadBody = 'No nearby hazards detected.';
+      roadAccentColor = const Color(0xFFFFE4A3);
+    } else {
+      final top = roadAlerts.first;
+      final distanceText = top.distanceMeters == null
+          ? ''
+          : ' • ${top.distanceMeters!.toStringAsFixed(1)}m';
+      roadTitle = 'Road alert';
+      roadBody =
+          '${top.label} • ${top.proximity}$distanceText • ${(top.score * 100).toStringAsFixed(1)}%';
+      roadAccentColor = const Color(0xFFB6F3C2);
+    }
+
+    String indoorTitle;
+    String indoorBody;
+    Color indoorAccentColor;
+
+    if (_indoorError != null) {
+      indoorTitle = 'Indoor detection unavailable';
+      indoorBody = _indoorError!;
+      indoorAccentColor = const Color(0xFFFFA3A3);
+    } else if (!_indoorReady) {
+      indoorTitle = 'Loading indoor detector...';
+      indoorBody = 'Preparing indoor model.';
+      indoorAccentColor = const Color(0xFFB3D4FF);
+    } else if (indoorAlerts.isEmpty) {
+      indoorTitle = 'No indoor alerts';
+      indoorBody = 'No nearby hazards detected.';
+      indoorAccentColor = const Color(0xFFFFE4A3);
+    } else {
+      final top = indoorAlerts.first;
+      final distanceText = top.distanceMeters == null
+          ? ''
+          : ' • ${top.distanceMeters!.toStringAsFixed(1)}m';
+      indoorTitle = 'Indoor alert';
+      indoorBody =
+          '${top.label} • ${top.proximity}$distanceText • ${(top.score * 100).toStringAsFixed(1)}%';
+      indoorAccentColor = const Color(0xFFB6F3C2);
+    }
+
+    return Positioned(
+      left: 16,
+      top: 16,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _buildDetectionCard(
+            title: roadTitle,
+            body: roadBody,
+            accentColor: roadAccentColor,
+          ),
+          const SizedBox(height: 8),
+          _buildDetectionCard(
+            title: indoorTitle,
+            body: indoorBody,
+            accentColor: indoorAccentColor,
+          ),
+        ],
+      ),
+    );
+  }
+
+  List<YoloDetection> _filterAlertDetections(
+    List<YoloDetection> detections,
+    Set<String> allowedLabels,
+  ) {
+    if (detections.isEmpty) return const [];
+    final alerts = detections.where((d) {
+      final normalized = _normalizeLabelForAlert(d.label);
+      if (!allowedLabels.contains(normalized)) return false;
+      if (d.distanceMeters != null) {
+        return d.distanceMeters! <= 10.0;
+      }
+      return d.proximity != 'far';
+    }).toList();
+    alerts.sort((a, b) {
+      final da = a.distanceMeters;
+      final db = b.distanceMeters;
+      if (da != null && db != null) {
+        return da.compareTo(db);
+      }
+      if (da != null) return -1;
+      if (db != null) return 1;
+      return b.score.compareTo(a.score);
+    });
+    return alerts;
+  }
+
+  String _normalizeLabelForAlert(String label) {
+    final lowered = label.trim().toLowerCase();
+    return lowered.replaceAll(RegExp(r'[^a-z0-9]+'), '');
+  }
+
+  int _urgencyRank(YoloDetection detection) {
+    final distance = detection.distanceMeters;
+    if (distance != null) {
+      if (distance <= 3.0) return 0;
+      if (distance <= 6.0) return 1;
+      if (distance <= 10.0) return 2;
+      return 3;
+    }
+    switch (detection.proximity) {
+      case 'urgent':
+        return 0;
+      case 'near':
+        return 1;
+      case 'mid':
+        return 2;
+      default:
+        return 3;
+    }
+  }
+
+  YoloDetection? _pickMostUrgentAlert(
+    List<YoloDetection> roadAlerts,
+    List<YoloDetection> indoorAlerts,
+  ) {
+    final combined = <YoloDetection>[
+      ...roadAlerts,
+      ...indoorAlerts,
+    ];
+    if (combined.isEmpty) return null;
+    combined.sort((a, b) {
+      final rankDiff = _urgencyRank(a).compareTo(_urgencyRank(b));
+      if (rankDiff != 0) return rankDiff;
+      final da = a.distanceMeters;
+      final db = b.distanceMeters;
+      if (da != null && db != null && da != db) {
+        return da.compareTo(db);
+      }
+      return b.score.compareTo(a.score);
+    });
+    return combined.first;
+  }
+
+  String _directionForRect(Rect rect) {
+    final frame = _lastFrameSize;
+    if (frame == null || frame.width <= 0) return 'ahead';
+    final centerX = rect.center.dx / frame.width;
+    if (centerX < 0.35) return 'left';
+    if (centerX > 0.65) return 'right';
+    return 'ahead';
+  }
+
+  String _distanceDescriptor(YoloDetection detection) {
+    final distance = detection.distanceMeters;
+    if (distance != null) {
+      if (distance <= 3.0) return 'very close';
+      if (distance <= 6.0) return 'nearby';
+      if (distance <= 10.0) return 'ahead';
+      return 'far';
+    }
+    switch (detection.proximity) {
+      case 'urgent':
+        return 'very close';
+      case 'near':
+        return 'nearby';
+      case 'mid':
+        return 'ahead';
+      default:
+        return 'far';
+    }
+  }
+
+  String _humanizeLabel(String label) {
+    final withSpaces = label
+        .replaceAll(RegExp(r'[_/]+'), ' ')
+        .replaceAllMapped(RegExp(r'([a-z])([A-Z])'), (m) => '${m[1]} ${m[2]}');
+    return withSpaces.trim().toLowerCase();
+  }
+
+  String _capitalize(String text) {
+    if (text.isEmpty) return text;
+    return text[0].toUpperCase() + text.substring(1);
+  }
+
+  String _buildAlertMessage(YoloDetection detection) {
+    final normalized = _normalizeLabelForAlert(detection.label);
+    final spokenLabel = _alertSpokenLabels[normalized] ?? _humanizeLabel(detection.label);
+    final direction = _directionForRect(detection.rect);
+    var distanceWord = _distanceDescriptor(detection);
+    if (direction != 'ahead' && distanceWord == 'ahead') {
+      distanceWord = 'nearby';
+    }
+    final directionPhrase = direction == 'ahead' ? 'ahead' : 'on your $direction';
+    final guidance = _alertGuidance[normalized];
+    final base = '${_capitalize(spokenLabel)} $distanceWord $directionPhrase.';
+    if (guidance == null) return base;
+    return '$base $guidance';
+  }
+
+  String _alertKey(YoloDetection detection) {
+    final normalized = _normalizeLabelForAlert(detection.label);
+    final direction = _directionForRect(detection.rect);
+    return '$normalized:${detection.proximity}:$direction';
+  }
+
+  Future<void> _maybeSpeakAlerts() async {
+    if (!_soundEnabled) return;
+    if (_voiceAssistant.isListening.value || _voiceAssistant.isSpeaking.value) return;
+    final now = DateTime.now();
+    if (now.difference(_lastAlertSpokenAt) < _alertSpeakCooldown) return;
+
+    final roadAlerts = _filterAlertDetections(_latestDetections, _roadAlertLabels);
+    final indoorAlerts = _filterAlertDetections(_latestIndoorDetections, _indoorAlertLabels);
+    final candidate = _pickMostUrgentAlert(roadAlerts, indoorAlerts);
+    if (candidate == null) return;
+
+    final message = _buildAlertMessage(candidate);
+    if (message.trim().isEmpty) return;
+
+    final key = _alertKey(candidate);
+    if (key == _lastAlertKey && now.difference(_lastAlertSpokenAt) < const Duration(seconds: 8)) {
+      return;
+    }
+
+    _lastAlertKey = key;
+    _lastAlertSpokenAt = now;
+    await _voiceAssistant.speak(message);
+  }
+
   Future<void> _disposeController(CameraController controller) async {
     try {
       if (controller.value.isStreamingImages) {
@@ -635,12 +1131,14 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _processCameraImage(CameraImage image) async {
-    if (_isProcessingFrame || _isCapturing) return;
+    if (_isProcessingFrame) return;
     if (!mounted || _currentState != HomeState.scanning) return;
     final now = DateTime.now();
     if (now.difference(_lastAnalysisTime) < _analysisInterval) return;
     _isProcessingFrame = true;
     _lastAnalysisTime = now;
+    _lastFrameSize = Size(image.width.toDouble(), image.height.toDouble());
+    _frameIndex++;
     try {
       final inputImage = _inputImageFromCameraImage(image);
       if (inputImage == null) return;
@@ -651,8 +1149,60 @@ class _HomeScreenState extends State<HomeScreen>
       ]);
       final mergedText = _mergeRecognizedText(results);
       final mergedRect = _mergeBoundingBoxes(results);
-      final primaryRect = _largestTextRect(results) ?? mergedRect;
-      _handleOcrResult(mergedText, image, primaryRect);
+      _handleOcrResult(mergedText, image, mergedRect);
+
+      final bool shouldRunRoad = _yoloReady &&
+          !_yoloInFlight &&
+          _frameIndex % _yoloFrameStride == 0 &&
+          now.difference(_lastYoloTime) > _yoloInterval;
+      final bool shouldRunIndoor = _indoorReady &&
+          !_indoorInFlight &&
+          _frameIndex % _indoorFrameStride == _indoorFrameOffset &&
+          now.difference(_lastIndoorTime) > _yoloInterval;
+      if (shouldRunRoad) {
+        _yoloInFlight = true;
+        _lastYoloTime = now;
+      }
+      if (shouldRunIndoor) {
+        _indoorInFlight = true;
+        _lastIndoorTime = now;
+      }
+      bool shouldSpeakAlerts = false;
+      if (shouldRunRoad || shouldRunIndoor) {
+        final rgbImage = _buildRgbImageForYolo(image);
+        if (rgbImage != null) {
+          if (shouldRunRoad) {
+            final detections = await _yoloDetector.detect(rgbImage);
+            if (mounted) {
+              setState(() {
+                _latestDetections = detections;
+              });
+            }
+            shouldSpeakAlerts = true;
+          }
+          if (shouldRunIndoor) {
+            final detections = await _indoorDetector.detect(
+              rgbImage,
+              confThreshold: 0.25,
+            );
+            if (mounted) {
+              setState(() {
+                _latestIndoorDetections = detections;
+              });
+            }
+            shouldSpeakAlerts = true;
+          }
+        }
+        if (shouldRunRoad) {
+          _yoloInFlight = false;
+        }
+        if (shouldRunIndoor) {
+          _indoorInFlight = false;
+        }
+        if (shouldSpeakAlerts) {
+          unawaited(_maybeSpeakAlerts());
+        }
+      }
     } catch (error) {
       debugPrint('OCR error: $error');
     } finally {
@@ -773,46 +1323,172 @@ class _HomeScreenState extends State<HomeScreen>
     return merged.join('\n').trim();
   }
 
-  void _handleOcrResult(String text, CameraImage image, Rect? mergedRect) {
-    final now = DateTime.now();
-    final imageSize = Size(image.width.toDouble(), image.height.toDouble());
-
-    if (mergedRect == null) {
-      _resetFocusStability();
-      _maybeProvideGuidance(null, imageSize, false);
-      if (mounted) {
-        setState(() {
-          _latestOcrText = '';
-        });
+  Rect? _mergeBoundingBoxes(List<RecognizedText> results) {
+    Rect? merged;
+    for (final result in results) {
+      for (final block in result.blocks) {
+        final rect = block.boundingBox;
+        if (merged == null) {
+          merged = rect;
+        } else {
+          final left = merged.left < rect.left ? merged.left : rect.left;
+          final top = merged.top < rect.top ? merged.top : rect.top;
+          final right = merged.right > rect.right ? merged.right : rect.right;
+          final bottom = merged.bottom > rect.bottom ? merged.bottom : rect.bottom;
+          merged = Rect.fromLTRB(left, top, right, bottom);
+        }
       }
-      return;
+    }
+    return merged;
+  }
+
+  bool _isCentered(Rect rect, Size frameSize) {
+    if (frameSize.width <= 0 || frameSize.height <= 0) return false;
+    final dx = rect.center.dx / frameSize.width - 0.5;
+    final dy = rect.center.dy / frameSize.height - 0.5;
+    return dx.abs() <= _centerTolerance && dy.abs() <= _centerTolerance;
+  }
+
+  String _directionGuidance(Rect rect, Size frameSize) {
+    final dx = rect.center.dx / frameSize.width - 0.5;
+    final dy = rect.center.dy / frameSize.height - 0.5;
+    if (dx.abs() >= dy.abs()) {
+      return dx < 0 ? 'Move left' : 'Move right';
+    }
+    return dy < 0 ? 'Move up' : 'Move down';
+  }
+
+  void _maybeProvideGuidance({
+    required Rect? focusRect,
+    required Size frameSize,
+    required bool hasText,
+    required double areaRatio,
+    required bool isCentered,
+    required bool isStable,
+  }) {
+    String message;
+    if (focusRect == null || !hasText) {
+      message = 'Point at a signboard.';
+    } else if (areaRatio < 0.03) {
+      message = 'Move closer to fill the signboard.';
+    } else if (!isCentered) {
+      message = _directionGuidance(focusRect, frameSize);
+    } else if (!isStable) {
+      message = 'Hold steady...';
+    } else {
+      message = 'Signboard detected.';
     }
 
     if (mounted) {
       setState(() {
-        _latestOcrText = text.trim();
+        _currentGuidanceText = message;
       });
     }
 
-    final bool isCentered = _isCentered(mergedRect, imageSize);
-    final bool isStable = _updateFocusStability(mergedRect, imageSize, now);
-    _maybeProvideGuidance(mergedRect, imageSize, isCentered);
+    if (message != 'Hold steady...') {
+      _holdAnnounced = false;
+    }
+    if (message != 'Signboard detected.') {
+      _detectedAnnounced = false;
+    }
 
-    final double areaRatio =
-        (mergedRect.width * mergedRect.height) / (imageSize.width * imageSize.height);
-    if (isStable &&
-        isCentered &&
-        areaRatio >= 0.03 &&
-        now.difference(_lastCaptureTime) >= _captureCooldown) {
-      unawaited(_announceAndCaptureFromFrame(image, mergedRect, imageSize, text));
+    if (!_soundEnabled) return;
+    if (message == 'Signboard detected.') return;
+    if (_voiceAssistant.isListening.value || _voiceAssistant.isSpeaking.value) return;
+
+    final now = DateTime.now();
+    if (message == _lastGuidanceText && now.difference(_lastGuidanceTime) < _guidanceCooldown) {
+      return;
+    }
+    if (message == 'Hold steady...' && _holdAnnounced) {
+      return;
+    }
+
+    _lastGuidanceText = message;
+    _lastGuidanceTime = now;
+    if (message == 'Hold steady...') {
+      _holdAnnounced = true;
+    }
+    unawaited(_voiceAssistant.speak(message));
+  }
+
+  bool _updateFocusStability(Rect rect) {
+    final now = DateTime.now();
+    final lastRect = _lastFocusRect;
+    if (lastRect == null) {
+      _lastFocusRect = rect;
+      _focusStableSince = now;
+      _holdAnnounced = false;
+      return false;
+    }
+    final iou = _rectIoU(lastRect, rect);
+    _lastFocusRect = rect;
+    if (iou >= 0.65) {
+      if (_focusStableSince.millisecondsSinceEpoch == 0) {
+        _focusStableSince = now;
+      }
+    } else {
+      _focusStableSince = now;
+      _holdAnnounced = false;
+    }
+    return now.difference(_focusStableSince) >= _captureHoldDuration;
+  }
+
+  void _resetFocusStability() {
+    _lastFocusRect = null;
+    _focusStableSince = DateTime.fromMillisecondsSinceEpoch(0);
+    _holdAnnounced = false;
+    _detectedAnnounced = false;
+  }
+
+  double _rectIoU(Rect a, Rect b) {
+    final left = a.left > b.left ? a.left : b.left;
+    final top = a.top > b.top ? a.top : b.top;
+    final right = a.right < b.right ? a.right : b.right;
+    final bottom = a.bottom < b.bottom ? a.bottom : b.bottom;
+    final overlapWidth = right - left;
+    final overlapHeight = bottom - top;
+    if (overlapWidth <= 0 || overlapHeight <= 0) return 0;
+    final intersection = overlapWidth * overlapHeight;
+    final union = a.width * a.height + b.width * b.height - intersection;
+    return union <= 0 ? 0 : intersection / union;
+  }
+
+  Future<void> _announceAndCaptureFromFrame(
+    CameraImage image,
+    Rect focusRect,
+    String text,
+  ) async {
+    if (_isCapturing) return;
+    _isCapturing = true;
+    _lastCaptureTime = DateTime.now();
+
+    if (mounted) {
+      setState(() {
+        _currentGuidanceText = 'Signboard detected.';
+      });
+    }
+
+    try {
+      if (_soundEnabled &&
+          !_detectedAnnounced &&
+          !_voiceAssistant.isListening.value &&
+          !_voiceAssistant.isSpeaking.value) {
+        _detectedAnnounced = true;
+        await _voiceAssistant.speak('Signboard detected.');
+      }
+      await _captureFromFrame(image, focusRect, text);
+    } finally {
+      _isCapturing = false;
     }
   }
 
-  Future<void> _maybeSendToGemini(
-    String filteredText,
-    Uint8List jpegBytes,
+  Future<void> _captureFromFrame(
+    CameraImage image,
+    Rect focusRect,
+    String text,
   ) async {
-    if (_geminiInFlight) return;
+    final filteredText = _filterOcrText(text);
     if (filteredText.isEmpty) {
       if (mounted) {
         setState(() {
@@ -824,24 +1500,105 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
 
-    if (!_geminiService.hasApiKey) {
-      debugPrint('GEMINI_API_KEY not set. Skipping Gemini.');
-      await _maybeSpeakOcrFallback(filteredText);
-      return;
-    }
-
-    final now = DateTime.now();
-    if (now.difference(_lastGeminiCall) < _geminiCooldown) {
-      if (now.difference(_lastSpokenTime) > const Duration(seconds: 8)) {
-        await _maybeSpeakOcrFallback(filteredText);
+    final jpegBytes = _buildGeminiImage(image, cropRect: focusRect);
+    if (jpegBytes == null) {
+      if (mounted) {
+        setState(() {
+          _latestGeminiError = 'Unable to prepare camera image for Gemini.';
+          _latestSmartText = '';
+          _latestSmartEmpty = false;
+        });
       }
       return;
     }
 
-    final filteredNormalized = _normalizeText(filteredText);
+    await _maybeSendToGemini(filteredText, jpegBytes);
+  }
+
+  void _handleOcrResult(String text, CameraImage image, Rect? focusRect) {
+    if (_isCapturing) return;
+    final cleaned = text.trim();
+    final normalized = _normalizeText(cleaned);
+    final now = DateTime.now();
+    final frameSize = Size(image.width.toDouble(), image.height.toDouble());
+
+    if (focusRect == null || normalized.isEmpty) {
+      _resetFocusStability();
+      _maybeProvideGuidance(
+        focusRect: null,
+        frameSize: frameSize,
+        hasText: normalized.isNotEmpty,
+        areaRatio: 0,
+        isCentered: false,
+        isStable: false,
+      );
+      if (normalized.isEmpty) {
+        return;
+      }
+    }
+
+    final areaRatio = focusRect == null
+        ? 0.0
+        : (focusRect.width * focusRect.height) /
+            (frameSize.width * frameSize.height);
+    final isCentered = focusRect != null && _isCentered(focusRect, frameSize);
+    final isStable = focusRect != null && _updateFocusStability(focusRect);
+
+    _maybeProvideGuidance(
+      focusRect: focusRect,
+      frameSize: frameSize,
+      hasText: normalized.isNotEmpty,
+      areaRatio: areaRatio,
+      isCentered: isCentered,
+      isStable: isStable,
+    );
+
+    final shouldUpdateText =
+        !(normalized == _lastEmittedText && now.difference(_lastEmitTime) < _emitCooldown);
+    if (shouldUpdateText && normalized.isNotEmpty) {
+      _lastEmittedText = normalized;
+      _lastEmitTime = now;
+      if (mounted) {
+        setState(() {
+          _latestOcrText = cleaned;
+          _latestSmartText = '';
+          _latestSmartEmpty = false;
+          _latestGeminiError = null;
+        });
+      }
+      debugPrint('OCR: $cleaned');
+    }
+
+    if (focusRect != null &&
+        normalized.isNotEmpty &&
+        isCentered &&
+        isStable &&
+        areaRatio >= 0.03 &&
+        now.difference(_lastCaptureTime) >= _captureCooldown) {
+      unawaited(_announceAndCaptureFromFrame(image, focusRect, cleaned));
+    }
+  }
+
+  Future<void> _maybeSendToGemini(String text, Uint8List jpegBytes) async {
+    if (_geminiInFlight) return;
+    if (!_geminiService.hasApiKey) {
+      debugPrint('GEMINI_API_KEY not set. Skipping Gemini.');
+      if (mounted) {
+        setState(() {
+          _latestGeminiError =
+              'Gemini API key missing. Run with --dart-define=GEMINI_API_KEY=YOUR_KEY';
+          _latestSmartText = '';
+          _latestSmartEmpty = false;
+        });
+      }
+      return;
+    }
+    final now = DateTime.now();
+    if (now.difference(_lastGeminiCall) < _geminiCooldown) return;
+
+    final filteredNormalized = _normalizeText(text);
     if (_lastGeminiText.isNotEmpty &&
-        _jaccardSimilarity(filteredNormalized, _lastGeminiText) >= 0.9 &&
-        now.difference(_lastGeminiCall) < const Duration(seconds: 12)) {
+        _jaccardSimilarity(filteredNormalized, _lastGeminiText) >= 0.9) {
       return;
     }
 
@@ -851,12 +1608,17 @@ class _HomeScreenState extends State<HomeScreen>
 
     try {
       final result = await _geminiService.analyze(
-        ocrText: filteredText,
+        ocrText: text,
         jpegBytes: jpegBytes,
-        preferredLanguage: _preferredLanguageLabel(),
       );
       if (result == null) {
-        await _maybeSpeakOcrFallback(filteredText);
+        if (mounted) {
+          setState(() {
+            _latestGeminiError = 'No response from Gemini.';
+            _latestSmartText = '';
+            _latestSmartEmpty = false;
+          });
+        }
         return;
       }
       if (result.action != null) {
@@ -870,160 +1632,46 @@ class _HomeScreenState extends State<HomeScreen>
           _latestGeminiError = null;
         });
       }
-      if (speak.isEmpty) {
-        await _maybeSpeakOcrFallback(filteredText);
-        return;
-      }
+      if (speak.isEmpty) return;
       debugPrint('Gemini speak: $speak');
-      if (!_soundEnabled) {
-        return;
+      if (_soundEnabled) {
+        await _speakGeminiText(speak);
       }
-      await _speakGeminiText(speak);
     } catch (error) {
       debugPrint('Gemini error: $error');
-      await _maybeSpeakOcrFallback(filteredText);
+      if (mounted) {
+        setState(() {
+          _latestGeminiError = 'Gemini error: ${error.toString()}';
+          _latestSmartText = '';
+          _latestSmartEmpty = false;
+        });
+      }
     } finally {
       _geminiInFlight = false;
     }
   }
 
-  void _resetFocusStability() {
-    _focusStableSince = DateTime.fromMillisecondsSinceEpoch(0);
-    _lastFocusRect = null;
-    _detectedAnnounced = false;
-  }
-
-  bool _updateFocusStability(Rect rect, Size imageSize, DateTime now) {
-    if (_lastFocusRect == null) {
-      _lastFocusRect = rect;
-      _focusStableSince = now;
-      _detectedAnnounced = false;
-      return false;
-    }
-
-    final double iou = _rectIoU(_lastFocusRect!, rect);
-    if (iou < 0.5) {
-      _focusStableSince = now;
-      _detectedAnnounced = false;
-    }
-
-    _lastFocusRect = rect;
-    final Duration requiredHold = _isCentered(rect, imageSize)
-        ? _captureHoldDuration
-        : const Duration(milliseconds: 1400);
-    return now.difference(_focusStableSince) >= requiredHold;
-  }
-
-  double _rectIoU(Rect a, Rect b) {
-    final double xA = a.left > b.left ? a.left : b.left;
-    final double yA = a.top > b.top ? a.top : b.top;
-    final double xB = a.right < b.right ? a.right : b.right;
-    final double yB = a.bottom < b.bottom ? a.bottom : b.bottom;
-
-    final double interWidth = (xB - xA).clamp(0.0, double.infinity);
-    final double interHeight = (yB - yA).clamp(0.0, double.infinity);
-    final double interArea = interWidth * interHeight;
-    if (interArea <= 0) return 0.0;
-
-    final double areaA = a.width * a.height;
-    final double areaB = b.width * b.height;
-    final double unionArea = areaA + areaB - interArea;
-    if (unionArea <= 0) return 0.0;
-    return interArea / unionArea;
-  }
-
-  Future<void> _announceAndCaptureFromFrame(
-    CameraImage image,
-    Rect focusRect,
-    Size imageSize,
-    String ocrText,
-  ) async {
-    if (_isCapturing || _detectedAnnounced) return;
-    _detectedAnnounced = true;
-    if (_soundEnabled) {
-      unawaited(_voiceAssistant.speak('Signboard detected. Capturing.'));
-    }
-    await _captureFromFrame(image, focusRect, imageSize, ocrText);
-  }
-
-  bool _isCentered(Rect rect, Size imageSize) {
-    // Check if the signboard size is reasonable (not too small, not too huge)
-    final areaRatio = (rect.width * rect.height) / (imageSize.width * imageSize.height);
-    if (areaRatio < 0.015 || areaRatio > 0.95) {
-      return false;
-    }
-    
-    // Normalized distance from center (0.0 to 1.0 scale)
-    final dx = ((rect.center.dx - imageSize.width / 2) / (imageSize.width / 2)).abs();
-    final dy = ((rect.center.dy - imageSize.height / 2) / (imageSize.height / 2)).abs();
-    
-    // Requirements for "centered": within 25% of the frame's center
-    return dx <= 0.25 && dy <= 0.25;
-  }
-
-  Future<void> _captureFromFrame(
-    CameraImage image,
-    Rect focusRect,
-    Size imageSize,
-    String ocrText,
-  ) async {
-    if (_isCapturing) return;
-    _isCapturing = true;
-    _lastCaptureTime = DateTime.now();
-    if (mounted) {
-      setState(() {
-        _latestSmartText = '';
-        _latestSmartEmpty = false;
-        _latestGeminiError = null;
-      });
-    }
-
-    try {
-      final filteredText = _filterOcrText(ocrText);
-      if (filteredText.isEmpty) {
-        await _maybeSpeakOcrFallback(ocrText);
-        return;
-      }
-
-      final jpegBytes =
-          _buildGeminiImage(image, focusRect: focusRect, imageSize: imageSize);
-      if (jpegBytes == null) {
-        await _maybeSpeakOcrFallback(filteredText);
-        return;
-      }
-      await _maybeSendToGemini(filteredText, jpegBytes);
-    } catch (error) {
-      debugPrint('Virtual capture error: $error');
-      if (mounted) {
-        setState(() {
-          _latestGeminiError = 'Unable to capture signboard.';
-        });
-      }
-    } finally {
-      _isCapturing = false;
-      _detectedAnnounced = false;
-    }
-  }
-
-  Uint8List? _buildGeminiImage(
-    CameraImage image, {
-    Rect? focusRect,
-    Size? imageSize,
-  }) {
+  Uint8List? _buildGeminiImage(CameraImage image, {Rect? cropRect}) {
     if (Platform.isIOS && image.format.group == ImageFormatGroup.bgra8888) {
-      return _buildJpegFromBgra(image, focusRect: focusRect, imageSize: imageSize);
+      return _buildJpegFromBgra(image, cropRect: cropRect);
     }
     if (Platform.isAndroid) {
-      return _buildJpegFromYuv420(image, focusRect: focusRect, imageSize: imageSize);
+      return _buildJpegFromYuv420(image, cropRect: cropRect);
     }
     return null;
   }
 
-  Uint8List? _buildJpegFromBgra(
-    CameraImage image, {
-    Rect? focusRect,
-    Size? imageSize,
-  }) {
+  img.Image? _buildRgbImageForYolo(CameraImage image) {
+    if (Platform.isIOS && image.format.group == ImageFormatGroup.bgra8888) {
+      return _buildRgbFromBgra(image);
+    }
+    if (Platform.isAndroid) {
+      return _buildRgbFromYuv420(image);
+    }
+    return null;
+  }
+
+  img.Image? _buildRgbFromBgra(CameraImage image) {
     if (image.planes.isEmpty) return null;
     final plane = image.planes.first;
     final bytes = plane.bytes;
@@ -1043,19 +1691,13 @@ class _HomeScreenState extends State<HomeScreen>
         final int b = bytes[index];
         final int g = bytes[index + 1];
         final int r = bytes[index + 2];
-        final int a = bytes[index + 3];
-        rgbImage.setPixelRgba(ox, oy, r, g, b, a);
+        rgbImage.setPixelRgba(ox, oy, r, g, b, 255);
       }
     }
-    final cropped = _maybeCrop(rgbImage, focusRect, imageSize);
-    return Uint8List.fromList(img.encodeJpg(cropped, quality: 75));
+    return rgbImage;
   }
 
-  Uint8List? _buildJpegFromYuv420(
-    CameraImage image, {
-    Rect? focusRect,
-    Size? imageSize,
-  }) {
+  img.Image? _buildRgbFromYuv420(CameraImage image) {
     if (image.planes.length < 3) return null;
     final width = image.width;
     final height = image.height;
@@ -1092,62 +1734,112 @@ class _HomeScreenState extends State<HomeScreen>
       }
     }
 
-    final cropped = _maybeCrop(rgbImage, focusRect, imageSize);
-    return Uint8List.fromList(img.encodeJpg(cropped, quality: 70));
+    return rgbImage;
   }
 
+  Uint8List? _buildJpegFromBgra(CameraImage image, {Rect? cropRect}) {
+    if (image.planes.isEmpty) return null;
+    final plane = image.planes.first;
+    final bytes = plane.bytes;
+    final width = image.width;
+    final height = image.height;
+    const downscale = 2;
+    final outputWidth = (width / downscale).floor();
+    final outputHeight = (height / downscale).floor();
+    final img.Image rgbImage = img.Image(width: outputWidth, height: outputHeight);
+    final int rowStride = plane.bytesPerRow;
 
+    for (int y = 0, oy = 0; y < height; y += downscale, oy++) {
+      final int rowStart = y * rowStride;
+      for (int x = 0, ox = 0; x < width; x += downscale, ox++) {
+        final int index = rowStart + (x * 4);
+        if (index + 3 >= bytes.length) continue;
+        final int b = bytes[index];
+        final int g = bytes[index + 1];
+        final int r = bytes[index + 2];
+        final int a = bytes[index + 3];
+        rgbImage.setPixelRgba(ox, oy, r, g, b, a);
+      }
+    }
+    final img.Image outputImage = _cropImageIfNeeded(
+      rgbImage,
+      cropRect: cropRect,
+      originalSize: Size(width.toDouble(), height.toDouble()),
+    );
+    return Uint8List.fromList(img.encodeJpg(outputImage, quality: 75));
+  }
 
-  img.Image _maybeCrop(
-    img.Image source,
-    Rect? focusRect,
-    Size? imageSize,
-  ) {
-    if (focusRect == null || imageSize == null) return source;
+  Uint8List? _buildJpegFromYuv420(CameraImage image, {Rect? cropRect}) {
+    if (image.planes.length < 3) return null;
+    final width = image.width;
+    final height = image.height;
+    const downscale = 2;
+    final outputWidth = (width / downscale).floor();
+    final outputHeight = (height / downscale).floor();
+    final img.Image rgbImage = img.Image(width: outputWidth, height: outputHeight);
 
-    final double areaRatio =
-        (focusRect.width * focusRect.height) / (imageSize.width * imageSize.height);
-    if (areaRatio < 0.02 || areaRatio > 0.9) {
-      return source;
+    final yPlane = image.planes[0];
+    final uPlane = image.planes[1];
+    final vPlane = image.planes[2];
+    final int yRowStride = yPlane.bytesPerRow;
+    final int uvRowStride = uPlane.bytesPerRow;
+    final int uvPixelStride = uPlane.bytesPerPixel ?? 1;
+
+    for (int y = 0, oy = 0; y < height; y += downscale, oy++) {
+      final int yRow = yRowStride * y;
+      final int uvRow = uvRowStride * (y >> 1);
+      for (int x = 0, ox = 0; x < width; x += downscale, ox++) {
+        final int yIndex = yRow + x;
+        final int uvIndex = uvRow + (x >> 1) * uvPixelStride;
+
+        final int yValue = yPlane.bytes[yIndex];
+        final int uValue = uPlane.bytes[uvIndex];
+        final int vValue = vPlane.bytes[uvIndex];
+
+        final int r = (yValue + 1.370705 * (vValue - 128)).round().clamp(0, 255);
+        final int g = (yValue - 0.337633 * (uValue - 128) - 0.698001 * (vValue - 128))
+            .round()
+            .clamp(0, 255);
+        final int b = (yValue + 1.732446 * (uValue - 128)).round().clamp(0, 255);
+
+        rgbImage.setPixelRgba(ox, oy, r, g, b, 255);
+      }
     }
 
-    final double scaleX = source.width / imageSize.width;
-    final double scaleY = source.height / imageSize.height;
+    final img.Image outputImage = _cropImageIfNeeded(
+      rgbImage,
+      cropRect: cropRect,
+      originalSize: Size(width.toDouble(), height.toDouble()),
+    );
+    return Uint8List.fromList(img.encodeJpg(outputImage, quality: 70));
+  }
 
-    final int left = (focusRect.left * scaleX).round().clamp(0, source.width - 1);
-    final int top = (focusRect.top * scaleY).round().clamp(0, source.height - 1);
-    final int right =
-        (focusRect.right * scaleX).round().clamp(left + 1, source.width);
-    final int bottom =
-        (focusRect.bottom * scaleY).round().clamp(top + 1, source.height);
+  img.Image _cropImageIfNeeded(
+    img.Image baseImage, {
+    required Rect? cropRect,
+    required Size originalSize,
+  }) {
+    if (cropRect == null) return baseImage;
+    if (cropRect.width <= 1 || cropRect.height <= 1) return baseImage;
 
-    int width = right - left;
-    int height = bottom - top;
+    final scaleX = baseImage.width / originalSize.width;
+    final scaleY = baseImage.height / originalSize.height;
 
-    // Expand slightly to include context.
-    final int padX = (width * 0.15).round();
-    final int padY = (height * 0.15).round();
-    final int newLeft = (left - padX).clamp(0, source.width - 1);
-    final int newTop = (top - padY).clamp(0, source.height - 1);
-    final int newRight = (right + padX).clamp(newLeft + 1, source.width);
-    final int newBottom = (bottom + padY).clamp(newTop + 1, source.height);
+    int left = (cropRect.left * scaleX).round();
+    int top = (cropRect.top * scaleY).round();
+    int right = (cropRect.right * scaleX).round();
+    int bottom = (cropRect.bottom * scaleY).round();
 
-    width = newRight - newLeft;
-    height = newBottom - newTop;
+    left = left.clamp(0, baseImage.width - 1).toInt();
+    top = top.clamp(0, baseImage.height - 1).toInt();
+    right = right.clamp(left + 1, baseImage.width).toInt();
+    bottom = bottom.clamp(top + 1, baseImage.height).toInt();
 
-    if (width <= 0 || height <= 0) return source;
+    final width = right - left;
+    final height = bottom - top;
+    if (width < 10 || height < 10) return baseImage;
 
-    try {
-      return img.copyCrop(
-        source,
-        x: newLeft,
-        y: newTop,
-        width: width,
-        height: height,
-      );
-    } catch (_) {
-      return source;
-    }
+    return img.copyCrop(baseImage, x: left, y: top, width: width, height: height);
   }
 
   Future<void> _speakGeminiText(String text) async {
@@ -1159,53 +1851,10 @@ class _HomeScreenState extends State<HomeScreen>
     }
     _lastSpokenText = normalized;
     _lastSpokenTime = now;
-    try {
-      await _voiceAssistant.speak(text);
-    } catch (error) {
-      debugPrint('TTS error: $error');
-      if (mounted) {
-        setState(() {
-          _latestGeminiError = 'TTS error: ${error.toString()}';
-        });
-      }
-    }
-  }
-
-  String _formatOcrForSpeech(String text) {
-    final lines = _extractUsefulLines(text);
-    if (lines.isEmpty) return '';
-    final merged = lines.join(', ');
-    return _truncateText(merged, maxChars: 320);
-  }
-
-  Future<void> _maybeSpeakOcrFallback(String text) async {
-    final speakText = _formatOcrForSpeech(text);
-    if (speakText.isEmpty) {
-      if (mounted) {
-        setState(() {
-          _latestSmartText = '';
-          _latestSmartEmpty = true;
-          _latestGeminiError = null;
-        });
-      }
-      return;
-    }
-    if (mounted) {
-      setState(() {
-        _latestSmartText = speakText;
-        _latestSmartEmpty = false;
-        _latestGeminiError = null;
-      });
-    }
-    if (!_soundEnabled) return;
-    await _speakGeminiText(speakText);
+    await _voiceAssistant.speak(text);
   }
 
   String _filterOcrText(String text) {
-    return _extractUsefulLines(text).join('\n');
-  }
-
-  List<String> _extractUsefulLines(String text) {
     final lines = text.split('\n');
     final filtered = <String>[];
     final seen = <String>{};
@@ -1217,9 +1866,9 @@ class _HomeScreenState extends State<HomeScreen>
       if (normalized.isEmpty) continue;
       if (!seen.add(normalized)) continue;
       filtered.add(trimmed);
-      if (filtered.length >= 30) break;
+      if (filtered.length >= 12) break;
     }
-    return filtered;
+    return filtered.join('\n');
   }
 
   bool _isNoiseLine(String line) {
@@ -1252,19 +1901,9 @@ class _HomeScreenState extends State<HomeScreen>
     for (final token in noisyTokens) {
       if (lower.contains(token)) return true;
     }
-    final alphaCount =
-        RegExp(r'[A-Za-z\u0900-\u097F\u0B80-\u0BFF]').allMatches(line).length;
-    final digitCount = RegExp(r'\d').allMatches(line).length;
-    if (line.isNotEmpty && (alphaCount / line.length) < 0.3 && digitCount < 4) {
+    final alphaCount = RegExp(r'[a-zA-Z]').allMatches(line).length;
+    if (line.length > 0 && (alphaCount / line.length) < 0.3) {
       return true;
-    }
-    if (line.length <= 4 && digitCount == 0) {
-      final hasVowel =
-          RegExp(r'[AEIOUaeiou\u0904-\u0914\u0B85-\u0B94]').hasMatch(line);
-      final isAllCaps = RegExp(r'^[A-Z]{2,4}$').hasMatch(line);
-      if (!hasVowel && !isAllCaps) {
-        return true;
-      }
     }
     return false;
   }
@@ -1282,92 +1921,9 @@ class _HomeScreenState extends State<HomeScreen>
     return text.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
   }
 
-  String _preferredLanguageLabel() {
-    switch (_selectedLanguage) {
-      case 'Hindi':
-        return 'Hindi';
-      case 'Tamil':
-        return 'Tamil';
-      case 'Marathi':
-        return 'Marathi';
-      case 'English':
-        return 'English';
-      default:
-        return 'Auto';
-    }
-  }
-
   String _truncateText(String text, {int maxChars = 160}) {
     if (text.length <= maxChars) return text;
     return '${text.substring(0, maxChars).trimRight()}...';
-  }
-
-  void _maybeProvideGuidance(Rect? rect, Size imageSize, bool isCentered) {
-    final bool allowSpeak = _soundEnabled;
-    if (rect == null) {
-      _holdAnnounced = false;
-      if (_currentGuidanceText.isNotEmpty && mounted) {
-        setState(() => _currentGuidanceText = '');
-      }
-      return;
-    }
-    if (_isCapturing || _geminiInFlight) return;
-
-    final now = DateTime.now();
-    if (now.difference(_lastGuidanceTime) < _guidanceCooldown) return;
-
-    String? guidance;
-
-    if (isCentered) {
-      if (!_holdAnnounced) {
-        guidance = 'Centered. Hold still.';
-        _holdAnnounced = true;
-      }
-    } else {
-      _holdAnnounced = false;
-      final dx = (rect.center.dx - imageSize.width / 2) / (imageSize.width / 2);
-      final dy = (rect.center.dy - imageSize.height / 2) / (imageSize.height / 2);
-      final areaRatio = (rect.width * rect.height) / (imageSize.width * imageSize.height);
-
-      if (areaRatio < 0.015) {
-        guidance = 'Move closer.';
-      } else if (dx > 0.3) {
-        guidance = 'Move left.';
-      } else if (dx < -0.3) {
-        guidance = 'Move right.';
-      } else if (dy > 0.3) {
-        guidance = 'Move down.';
-      } else if (dy < -0.3) {
-        guidance = 'Move up.';
-      } else {
-        guidance = 'Center the signboard.';
-      }
-    }
-
-    if (guidance == null) {
-      if (_currentGuidanceText.isNotEmpty && mounted) {
-        setState(() => _currentGuidanceText = '');
-      }
-      return;
-    }
-    if (guidance == _lastGuidanceText) return;
-
-    _lastGuidanceText = guidance;
-    _lastGuidanceTime = now;
-    if (mounted) {
-      setState(() => _currentGuidanceText = guidance!);
-    }
-    if (allowSpeak) {
-      unawaited(_speakGuidance(guidance));
-    }
-  }
-
-  Future<void> _speakGuidance(String text) async {
-    try {
-      await _voiceAssistant.speak(text);
-    } catch (_) {
-      // Ignore guidance TTS errors
-    }
   }
 
   double _jaccardSimilarity(String a, String b) {
@@ -1378,6 +1934,8 @@ class _HomeScreenState extends State<HomeScreen>
     final union = aTokens.union(bTokens).length;
     return union == 0 ? 0 : intersection / union;
   }
+
+  // Voice response handling reserved for future 2-way conversations.
 
   void _showSettingsBottomSheet() {
     showModalBottomSheet(
@@ -1393,9 +1951,7 @@ class _HomeScreenState extends State<HomeScreen>
             return Padding(
               padding: EdgeInsets.only(
                 bottom: MediaQuery.of(context).viewInsets.bottom,
-                top: 24,
-                left: 24,
-                right: 24,
+                top: 24, left: 24, right: 24,
               ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
@@ -1404,14 +1960,7 @@ class _HomeScreenState extends State<HomeScreen>
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(
-                        'Settings',
-                        style: GoogleFonts.outfit(
-                          fontSize: 28,
-                          fontWeight: FontWeight.bold,
-                          color: const Color(0xFF1A1A1A),
-                        ),
-                      ),
+                      Text('Settings', style: GoogleFonts.outfit(fontSize: 28, fontWeight: FontWeight.bold, color: const Color(0xFF1A1A1A))),
                       IconButton(
                         icon: const Icon(Icons.close, size: 32, color: Color(0xFF1A1A1A)),
                         onPressed: () => Navigator.pop(context),
@@ -1421,22 +1970,12 @@ class _HomeScreenState extends State<HomeScreen>
                   ),
                   const SizedBox(height: 24),
                   // Language Selector
-                  Text(
-                    'Language',
-                    style: GoogleFonts.outfit(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w600,
-                      color: const Color(0xFF1A1A1A),
-                    ),
-                  ),
+                  Text('Language', style: GoogleFonts.outfit(fontSize: 18, fontWeight: FontWeight.w600, color: const Color(0xFF1A1A1A))),
                   const SizedBox(height: 8),
                   DropdownButtonFormField<String>(
                     value: _selectedLanguage,
                     items: ['English', 'Hindi', 'Tamil'].map((lang) {
-                      return DropdownMenuItem(
-                        value: lang,
-                        child: Text(lang, style: const TextStyle(fontSize: 18)),
-                      );
+                      return DropdownMenuItem(value: lang, child: Text(lang, style: const TextStyle(fontSize: 18)));
                     }).toList(),
                     onChanged: (val) {
                       if (val == null) return;
@@ -1452,28 +1991,15 @@ class _HomeScreenState extends State<HomeScreen>
                   ),
                   const SizedBox(height: 24),
                   // Emergency Contact
-                  Text(
-                    'Emergency Contact',
-                    style: GoogleFonts.outfit(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w600,
-                      color: const Color(0xFF1A1A1A),
-                    ),
-                  ),
+                  Text('Emergency Contact', style: GoogleFonts.outfit(fontSize: 18, fontWeight: FontWeight.w600, color: const Color(0xFF1A1A1A))),
                   const SizedBox(height: 8),
                   TextFormField(
-                    decoration: const InputDecoration(
-                      labelText: 'Name',
-                      hintText: 'e.g. John Doe',
-                    ),
+                    decoration: const InputDecoration(labelText: 'Name', hintText: 'e.g. John Doe'),
                     style: const TextStyle(fontSize: 18, color: Color(0xFF1A1A1A)),
                   ),
                   const SizedBox(height: 12),
                   TextFormField(
-                    decoration: const InputDecoration(
-                      labelText: 'Phone Number',
-                      hintText: 'e.g. +1234567890',
-                    ),
+                    decoration: const InputDecoration(labelText: 'Phone Number', hintText: 'e.g. +1234567890'),
                     keyboardType: TextInputType.phone,
                     style: const TextStyle(fontSize: 18, color: Color(0xFF1A1A1A)),
                   ),
@@ -1481,14 +2007,7 @@ class _HomeScreenState extends State<HomeScreen>
                   // Sound Toggle
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,
-                    title: Text(
-                      'Audio Feedback',
-                      style: GoogleFonts.outfit(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w600,
-                        color: const Color(0xFF1A1A1A),
-                      ),
-                    ),
+                    title: Text('Audio Feedback', style: GoogleFonts.outfit(fontSize: 18, fontWeight: FontWeight.w600, color: const Color(0xFF1A1A1A))),
                     value: _soundEnabled,
                     onChanged: (val) {
                       setModalState(() => _soundEnabled = val);
@@ -1509,11 +2028,3 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 }
-
-
-
-
-
-
-
-

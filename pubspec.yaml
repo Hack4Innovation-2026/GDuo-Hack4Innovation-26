@@ -33,6 +33,7 @@ dependencies:
   flutter_tts: ^4.2.5
   http: ^1.2.2
   image: ^4.2.0
+  onnxruntime: ^1.4.0
 
 dev_dependencies:
   flutter_test:

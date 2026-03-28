@@ -15,11 +15,17 @@ const String GEMINI_API_KEY = 'AIzaSyA_HhasPrATdqwWTcpfOwqbzEkMcZAdeAo';
 const String GEMINI_ENDPOINT =
     'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
 
-/// Path to the YOLOv8-Nano ONNX model asset
-const String YOLO_MODEL_ASSET = 'assets/models/yolov8n.onnx';
+/// Path to the YOLOv8 ONNX model asset (exported from best.pt)
+const String YOLO_MODEL_ASSET = 'assets/models/best.onnx';
 
-/// Path to the COCO class labels asset
-const String COCO_LABELS_ASSET = 'assets/models/coco_labels.txt';
+/// Path to the model class labels asset
+const String COCO_LABELS_ASSET = 'assets/models/road_labels.txt';
+
+/// Path to the indoor YOLOv8 ONNX model asset
+const String INDOOR_YOLO_MODEL_ASSET = 'assets/models/indoor.onnx';
+
+/// Path to the indoor model class labels asset
+const String INDOOR_LABELS_ASSET = 'assets/models/indoor_labels.txt';
 
 /// Cosine similarity threshold for face recognition
 const double FACE_SIMILARITY_THRESHOLD = 0.82;

@@ -43,3 +43,22 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Models
+*.pt
+*.pth
+
+# Data
+datasets/
+data/
+*.zip
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Logs
+runs/
+
+# ONNX models
+*.onnx
