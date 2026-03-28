@@ -115,6 +115,34 @@ class VoiceAssistantService {
     }
   }
 
+  Future<void> requestUserQuery({
+    String? prompt,
+    required Future<void> Function(String text) onUserResponse,
+  }) async {
+    if (_isBusy) return;
+    if (!_initialized) {
+      await initialize(localeId: _localeId);
+    }
+    _isBusy = true;
+    lastError.value = null;
+    liveTranscript.value = '';
+
+    if (prompt != null && prompt.trim().isNotEmpty) {
+      _pendingUserResponse = onUserResponse;
+      final result = await _tts.speak(prompt);
+      if ((result is int && result == 0) || (result is bool && result == false)) {
+        _isBusy = false;
+        _pendingUserResponse = null;
+        lastError.value = 'Unable to start speech synthesis.';
+      }
+      return;
+    }
+
+    await _startListening(onUserResponse);
+    liveTranscript.value = '';
+    _isBusy = false;
+  }
+
   Future<void> _configureTts() async {
     try {
       await _tts.setEngine('com.google.android.tts');

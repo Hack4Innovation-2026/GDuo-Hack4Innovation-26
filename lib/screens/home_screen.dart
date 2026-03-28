@@ -73,6 +73,16 @@ class _HomeScreenState extends State<HomeScreen>
   bool _geminiInFlight = false;
   bool _latestSmartEmpty = false;
   bool _isCapturing = false;
+  bool _conversationModeEnabled = false;
+  bool _conversationInFlight = false;
+  String? _pendingConversationQuestion;
+  bool _intentModeEnabled = false;
+  bool _intentInFlight = false;
+  String? _pendingIntentQuery;
+  String? _activeIntentQuery;
+  DateTime _lastIntentCall = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastIntentSpokenTime = DateTime.fromMillisecondsSinceEpoch(0);
+  String _lastIntentKey = '';
   DateTime _lastCaptureTime = DateTime.fromMillisecondsSinceEpoch(0);
   Rect? _lastFocusRect;
   DateTime _focusStableSince = DateTime.fromMillisecondsSinceEpoch(0);
@@ -95,6 +105,23 @@ class _HomeScreenState extends State<HomeScreen>
   static const Duration _guidanceCooldown = Duration(seconds: 2);
   static const double _centerTolerance = 0.12;
   static const Duration _yoloInterval = Duration(milliseconds: 900);
+  static const Duration _conversationRearmDelay = Duration(milliseconds: 600);
+  static const Duration _intentCooldown = Duration(seconds: 6);
+  static const Duration _intentScanInterval = Duration(seconds: 2);
+  static const Map<String, List<String>> _intentKeywordHints = {
+    'medical': ['medical', 'pharmacy', 'chemist', 'drug', 'drugs', 'medicine', 'pharma'],
+    'hospital': ['hospital', 'clinic', 'emergency', 'er', 'casualty'],
+    'restaurant': ['restaurant', 'cafe', 'café', 'dhaba', 'eatery', 'food', 'tiffin', 'hotel'],
+    'grocery': ['grocery', 'supermarket', 'mart', 'store', 'kirana', 'provisions'],
+    'bank': ['bank', 'atm', 'cash', 'finance'],
+    'hotel': ['hotel', 'lodge', 'inn', 'resort', 'guest house', 'guesthouse'],
+    'school': ['school', 'academy', 'vidyalaya', 'college', 'university', 'institute'],
+    'temple': ['temple', 'mandir'],
+    'mosque': ['mosque', 'masjid'],
+    'church': ['church', 'chapel'],
+    'police': ['police', 'station', 'ps'],
+    'fuel': ['fuel', 'petrol', 'diesel', 'gas', 'pump', 'filling'],
+  };
   static const int _yoloFrameStride = 4;
   static const int _indoorFrameStride = 4;
   static const int _indoorFrameOffset = 2;
@@ -265,6 +292,8 @@ class _HomeScreenState extends State<HomeScreen>
             _buildMainContent(),
             _buildDetectionOverlay(),
             _buildTopRightSettings(),
+            _buildBottomRightIntent(),
+            _buildBottomRightConversation(),
             _buildBottomRightSOS(),
           ],
         ),
@@ -610,6 +639,87 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
+  Widget _buildBottomRightConversation() {
+    if (_currentState != HomeState.scanning) {
+      return const SizedBox.shrink();
+    }
+    final isActive = _conversationModeEnabled;
+    return Positioned(
+      bottom: 104,
+      right: 28,
+      child: InkWell(
+        onTap: _toggleConversationMode,
+        borderRadius: BorderRadius.circular(24),
+        child: Container(
+          width: 48,
+          height: 48,
+          decoration: BoxDecoration(
+            color: isActive ? const Color(0xFF1A56DB) : Colors.white,
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: isActive ? const Color(0xFF1A56DB) : const Color(0xFFB3D4FF),
+              width: 2,
+            ),
+            boxShadow: const [
+              BoxShadow(color: Colors.black26, blurRadius: 6, offset: Offset(0, 3)),
+            ],
+          ),
+          child: Icon(
+            isActive ? Icons.mark_chat_read_rounded : Icons.mark_chat_unread_rounded,
+            color: isActive ? Colors.white : const Color(0xFF1A56DB),
+            size: 26,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBottomRightIntent() {
+    if (_currentState != HomeState.scanning) {
+      return const SizedBox.shrink();
+    }
+    final isActive = _intentModeEnabled;
+    return Positioned(
+      bottom: 160,
+      right: 28,
+      child: InkWell(
+        onTap: () {
+          if (_intentModeEnabled) {
+            unawaited(_requestIntentQuery(initialPrompt: false));
+          } else {
+            unawaited(_toggleIntentMode());
+          }
+        },
+        onLongPress: () {
+          if (_intentModeEnabled) {
+            unawaited(_toggleIntentMode());
+          }
+        },
+        borderRadius: BorderRadius.circular(24),
+        child: Container(
+          width: 48,
+          height: 48,
+          decoration: BoxDecoration(
+            color: isActive ? const Color(0xFF2F9E44) : Colors.white,
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: isActive ? const Color(0xFF2F9E44) : const Color(0xFFB3D4FF),
+              width: 2,
+            ),
+            boxShadow: const [
+              BoxShadow(color: Colors.black26, blurRadius: 6, offset: Offset(0, 3)),
+            ],
+          ),
+          child: Icon(
+            isActive ? Icons.search_rounded : Icons.search_outlined,
+            color: isActive ? Colors.white : const Color(0xFF1A56DB),
+            size: 26,
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _startOcrPipeline() async {
     setState(() {
       _cameraError = null;
@@ -751,6 +861,16 @@ class _HomeScreenState extends State<HomeScreen>
         _lastGuidanceText = '';
         _currentGuidanceText = '';
         _holdAnnounced = false;
+        _conversationModeEnabled = false;
+        _conversationInFlight = false;
+        _pendingConversationQuestion = null;
+        _intentModeEnabled = false;
+        _intentInFlight = false;
+        _pendingIntentQuery = null;
+        _activeIntentQuery = null;
+        _lastIntentCall = DateTime.fromMillisecondsSinceEpoch(0);
+        _lastIntentSpokenTime = DateTime.fromMillisecondsSinceEpoch(0);
+        _lastIntentKey = '';
       });
       WidgetsBinding.instance.addPostFrameCallback((_) {
         unawaited(_disposeController(controller));
@@ -761,6 +881,98 @@ class _HomeScreenState extends State<HomeScreen>
     _cameraReady = false;
     _isStreaming = false;
     unawaited(_disposeController(controller));
+  }
+
+  Future<void> _toggleConversationMode() async {
+    final enable = !_conversationModeEnabled;
+    if (mounted) {
+      setState(() {
+        _conversationModeEnabled = enable;
+        if (enable) {
+          _intentModeEnabled = false;
+          _intentInFlight = false;
+          _pendingIntentQuery = null;
+          _activeIntentQuery = null;
+        }
+      });
+    }
+    if (!enable) {
+      _pendingConversationQuestion = null;
+      _conversationInFlight = false;
+      await _voiceAssistant.stop();
+      return;
+    }
+    if (_intentModeEnabled) {
+      _intentModeEnabled = false;
+      _activeIntentQuery = null;
+    }
+    await _requestConversationQuestion(initialPrompt: true);
+  }
+
+  Future<void> _toggleIntentMode() async {
+    final enable = !_intentModeEnabled;
+    if (mounted) {
+      setState(() {
+        _intentModeEnabled = enable;
+        if (enable) {
+          _conversationModeEnabled = false;
+          _conversationInFlight = false;
+          _pendingConversationQuestion = null;
+        }
+      });
+    }
+    if (!enable) {
+      _pendingIntentQuery = null;
+      _activeIntentQuery = null;
+      _intentInFlight = false;
+      await _voiceAssistant.stop();
+      return;
+    }
+    if (_conversationModeEnabled) {
+      _conversationModeEnabled = false;
+    }
+    await _requestIntentQuery(initialPrompt: true);
+  }
+
+  Future<void> _requestConversationQuestion({required bool initialPrompt}) async {
+    if (!_cameraReady) {
+      if (_soundEnabled) {
+        await _voiceAssistant.speak('Camera is not ready yet.');
+      }
+      return;
+    }
+    final prompt = initialPrompt
+        ? 'Conversation mode on. Ask your question.'
+        : 'Ask another question.';
+    await _voiceAssistant.requestUserQuery(
+      prompt: _soundEnabled ? prompt : null,
+      onUserResponse: (text) async {
+        final trimmed = text.trim();
+        if (trimmed.isEmpty) return;
+        _pendingConversationQuestion = trimmed;
+      },
+    );
+  }
+
+  Future<void> _requestIntentQuery({required bool initialPrompt}) async {
+    if (!_cameraReady) {
+      if (_soundEnabled) {
+        await _voiceAssistant.speak('Camera is not ready yet.');
+      }
+      return;
+    }
+    final prompt = initialPrompt
+        ? 'Intent search on. What are you looking for?'
+        : 'What should I look for?';
+    await _voiceAssistant.requestUserQuery(
+      prompt: _soundEnabled ? prompt : null,
+      onUserResponse: (text) async {
+        final trimmed = text.trim();
+        if (trimmed.isEmpty) return;
+        _pendingIntentQuery = trimmed;
+        _activeIntentQuery = trimmed;
+      },
+    );
   }
 
   Widget _buildSmartOverlay() {
@@ -1149,6 +1361,19 @@ class _HomeScreenState extends State<HomeScreen>
       ]);
       final mergedText = _mergeRecognizedText(results);
       final mergedRect = _mergeBoundingBoxes(results);
+      if (_pendingConversationQuestion != null && !_conversationInFlight) {
+        final question = _pendingConversationQuestion!;
+        _pendingConversationQuestion = null;
+        unawaited(_answerConversation(question, mergedText, image));
+      }
+      if (_intentModeEnabled &&
+          _activeIntentQuery != null &&
+          !_intentInFlight &&
+          !_conversationInFlight &&
+          _pendingConversationQuestion == null) {
+        final query = _activeIntentQuery!;
+        unawaited(_checkIntentMatch(query, mergedText, image, mergedRect));
+      }
       _handleOcrResult(mergedText, image, mergedRect);
 
       final bool shouldRunRoad = _yoloReady &&
@@ -1515,6 +1740,184 @@ class _HomeScreenState extends State<HomeScreen>
     await _maybeSendToGemini(filteredText, jpegBytes);
   }
 
+  Future<void> _answerConversation(
+    String question,
+    String ocrText,
+    CameraImage image,
+  ) async {
+    if (_conversationInFlight || _geminiInFlight) return;
+    _conversationInFlight = true;
+    _geminiInFlight = true;
+
+    if (mounted) {
+      setState(() {
+        _latestSmartText = 'Thinking...';
+        _latestSmartEmpty = false;
+        _latestGeminiError = null;
+      });
+    }
+
+    final cleaned = ocrText.trim();
+    if (cleaned.isEmpty) {
+      if (_soundEnabled) {
+        await _voiceAssistant.speak('I cannot see any text to answer that.');
+      }
+      _conversationInFlight = false;
+      _geminiInFlight = false;
+      await _maybeContinueConversation();
+      return;
+    }
+
+    final filteredText = _filterOcrTextForConversation(cleaned);
+    final textForGemini = filteredText.isNotEmpty ? filteredText : cleaned;
+    final jpegBytes = _buildGeminiImage(image);
+    if (jpegBytes == null) {
+      if (mounted) {
+        setState(() {
+          _latestGeminiError = 'Unable to prepare camera image for Gemini.';
+          _latestSmartText = '';
+          _latestSmartEmpty = false;
+        });
+      }
+      _conversationInFlight = false;
+      _geminiInFlight = false;
+      await _maybeContinueConversation();
+      return;
+    }
+
+    try {
+      final result = await _geminiService.analyzeConversation(
+        question: question,
+        ocrText: textForGemini,
+        jpegBytes: jpegBytes,
+        preferredLanguage: _selectedLanguage,
+      );
+      if (result == null) {
+        if (mounted) {
+          setState(() {
+            _latestGeminiError = 'No response from Gemini.';
+            _latestSmartText = '';
+            _latestSmartEmpty = false;
+          });
+        }
+        _conversationInFlight = false;
+        _geminiInFlight = false;
+        await _maybeContinueConversation();
+        return;
+      }
+      final speak = result.speak.trim();
+      if (mounted) {
+        setState(() {
+          _latestSmartText = speak;
+          _latestSmartEmpty = speak.isEmpty;
+          _latestGeminiError = null;
+        });
+      }
+      if (_soundEnabled && speak.isNotEmpty) {
+        await _speakGeminiText(speak);
+      } else if (_soundEnabled && speak.isEmpty) {
+        await _voiceAssistant.speak('I cannot see that answer right now.');
+      }
+    } catch (error) {
+      debugPrint('Conversation error: $error');
+      if (mounted) {
+        setState(() {
+          _latestGeminiError = 'Gemini error: ${error.toString()}';
+          _latestSmartText = '';
+          _latestSmartEmpty = false;
+        });
+      }
+    } finally {
+      _conversationInFlight = false;
+      _geminiInFlight = false;
+    }
+
+    await _maybeContinueConversation();
+  }
+
+  Future<void> _maybeContinueConversation() async {
+    if (!_conversationModeEnabled) return;
+    if (_voiceAssistant.isListening.value || _voiceAssistant.isSpeaking.value) return;
+    await Future<void>.delayed(_conversationRearmDelay);
+    if (!_conversationModeEnabled) return;
+    await _requestConversationQuestion(initialPrompt: false);
+  }
+
+  Future<void> _checkIntentMatch(
+    String intent,
+    String ocrText,
+    CameraImage image,
+    Rect? focusRect,
+  ) async {
+    if (_intentInFlight || _geminiInFlight) return;
+    final now = DateTime.now();
+    if (now.difference(_lastIntentCall) < _intentScanInterval) return;
+    _lastIntentCall = now;
+
+    final cleaned = ocrText.trim();
+    if (cleaned.isEmpty) return;
+
+    final filteredText = _filterOcrTextForConversation(cleaned);
+    final textForGemini = filteredText.isNotEmpty ? filteredText : cleaned;
+    if (_matchesIntentWithOcr(intent, textForGemini)) {
+      await _announceIntentMatch(_activeIntentQuery ?? intent, focusRect);
+      return;
+    }
+
+    final jpegBytes = _buildGeminiImage(image, cropRect: focusRect);
+    if (jpegBytes == null) return;
+
+    _intentInFlight = true;
+    _geminiInFlight = true;
+
+    try {
+      final result = await _geminiService.analyzeIntent(
+        intent: intent,
+        ocrText: textForGemini,
+        jpegBytes: jpegBytes,
+      );
+      if (result == null || !result.match) {
+        return;
+      }
+      await _announceIntentMatch(_activeIntentQuery ?? (result.category ?? intent), focusRect);
+    } catch (error) {
+      debugPrint('Intent error: $error');
+    } finally {
+      _intentInFlight = false;
+      _geminiInFlight = false;
+    }
+  }
+
+  Future<void> _announceIntentMatch(String intentName, Rect? focusRect) async {
+    final now = DateTime.now();
+    final direction = focusRect != null ? _directionForRect(focusRect) : 'ahead';
+    var canonical = _canonicalIntentName(intentName).toUpperCase();
+    if (!canonical.contains('STORE')) {
+      canonical = '$canonical STORE';
+    }
+    final directionPhrase =
+        direction == 'ahead' ? 'AHEAD' : 'ON YOUR ${direction.toUpperCase()}';
+    final message = '$canonical DETECTED $directionPhrase';
+    final key = '${_normalizeText(canonical)}:$direction';
+
+    if (key == _lastIntentKey && now.difference(_lastIntentSpokenTime) < _intentCooldown) {
+      return;
+    }
+
+    _lastIntentKey = key;
+    _lastIntentSpokenTime = now;
+    if (mounted) {
+      setState(() {
+        _latestSmartText = message;
+        _latestSmartEmpty = false;
+        _latestGeminiError = null;
+      });
+    }
+    if (_soundEnabled && !_voiceAssistant.isListening.value && !_voiceAssistant.isSpeaking.value) {
+      await _voiceAssistant.speak(message);
+    }
+  }
+
   void _handleOcrResult(String text, CameraImage image, Rect? focusRect) {
     if (_isCapturing) return;
     final cleaned = text.trim();
@@ -1574,7 +1977,13 @@ class _HomeScreenState extends State<HomeScreen>
         isCentered &&
         isStable &&
         areaRatio >= 0.03 &&
-        now.difference(_lastCaptureTime) >= _captureCooldown) {
+        now.difference(_lastCaptureTime) >= _captureCooldown &&
+        !_conversationModeEnabled &&
+        !_conversationInFlight &&
+        _pendingConversationQuestion == null &&
+        !_intentModeEnabled &&
+        !_intentInFlight &&
+        _pendingIntentQuery == null) {
       unawaited(_announceAndCaptureFromFrame(image, focusRect, cleaned));
     }
   }
@@ -1869,6 +2278,67 @@ class _HomeScreenState extends State<HomeScreen>
       if (filtered.length >= 12) break;
     }
     return filtered.join('\n');
+  }
+
+  String _filterOcrTextForConversation(String text) {
+    final lines = text.split('\n');
+    final filtered = <String>[];
+    final seen = <String>{};
+    for (final line in lines) {
+      final trimmed = line.trim();
+      if (trimmed.isEmpty) continue;
+      if (_isNoiseLine(trimmed)) continue;
+
+      final normalized = _normalizeText(trimmed);
+      if (normalized.isEmpty) continue;
+      if (!seen.add(normalized)) continue;
+
+      final hasLetters = RegExp(r'[a-zA-Z]').hasMatch(trimmed);
+      final hasDigits = RegExp(r'\d').hasMatch(trimmed);
+      final hasCurrency = RegExp(r'[₹$€£]|rs\.?|inr', caseSensitive: false)
+          .hasMatch(trimmed);
+
+      if (hasLetters || hasDigits || hasCurrency) {
+        filtered.add(trimmed);
+      }
+      if (filtered.length >= 20) break;
+    }
+    return filtered.join('\n');
+  }
+
+  List<String> _intentKeywordsForQuery(String intent) {
+    final normalized = _normalizeText(intent);
+    final keywords = <String>{};
+    for (final entry in _intentKeywordHints.entries) {
+      if (normalized.contains(entry.key)) {
+        keywords.addAll(entry.value.map(_normalizeText));
+      }
+    }
+    keywords.addAll(
+      normalized
+          .split(' ')
+          .map((token) => token.trim())
+          .where((token) => token.length >= 2),
+    );
+    return keywords.toList();
+  }
+
+  bool _matchesIntentWithOcr(String intent, String ocrText) {
+    final normalizedText = _normalizeText(ocrText);
+    if (normalizedText.isEmpty) return false;
+    for (final keyword in _intentKeywordsForQuery(intent)) {
+      if (keyword.isEmpty) continue;
+      if (normalizedText.contains(keyword)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  String _canonicalIntentName(String intent) {
+    final normalized = _normalizeText(intent);
+    if (normalized.isEmpty) return 'Store';
+    return intent.trim();
   }
 
   bool _isNoiseLine(String line) {
