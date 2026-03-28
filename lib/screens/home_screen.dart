@@ -18,6 +18,18 @@ import '../services/yolo_detector_service.dart';
 
 enum HomeState { idle, permission, scanning }
 
+class _DetectionHistory {
+  _DetectionHistory({
+    required this.rect,
+    required this.seenAt,
+    required this.streak,
+  });
+
+  Rect rect;
+  DateTime seenAt;
+  int streak;
+}
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -92,6 +104,7 @@ class _HomeScreenState extends State<HomeScreen>
   static const Duration _emitCooldown = Duration(milliseconds: 1500);
   static const Duration _speechCooldown = Duration(seconds: 4);
   static const Duration _alertSpeakCooldown = Duration(seconds: 4);
+  static const Duration _signboardPriorityWindow = Duration(seconds: 5);
   static const Duration _geminiCooldown = Duration(seconds: 6);
   static const Duration _yoloInterval = Duration(milliseconds: 900);
   static const int _yoloFrameStride = 4;
@@ -104,10 +117,22 @@ class _HomeScreenState extends State<HomeScreen>
   static const Duration _signboardLandmarkHold = Duration(seconds: 2);
   static const double _signboardLandmarkSmoothing = 0.6;
   int _frameIndex = 0;
-  static const double _roadMinConfidence = 0.35;
-  static const double _indoorMinConfidence = 0.4;
-  static const int _alertStreakTarget = 2;
+  static const double _roadMinConfidence = 0.45;
+  static const double _indoorMinConfidence = 0.5;
+  static const double _roadIndoorContextMinConfidence = 0.8;
+  static const double _roadNoContextMinConfidence = 0.75;
+  static const double _hazardSpeakDistanceMeters = 5.0;
+  static const int _alertStreakTarget = 3;
   final Map<String, int> _alertStreaks = {};
+  static const Duration _indoorContextHold = Duration(seconds: 3);
+  DateTime _indoorContextUntil = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _roadContextHold = Duration(seconds: 2);
+  DateTime _roadContextUntil = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _stabilityWindow = Duration(milliseconds: 1200);
+  static const double _stabilityIoU = 0.4;
+  static const int _stabilityTarget = 3;
+  final Map<String, _DetectionHistory> _indoorHistory = {};
+  final Map<String, _DetectionHistory> _roadHistory = {};
 
   static const Set<String> _roadAlertLabels = {
     'vehiclehazard',
@@ -175,6 +200,16 @@ class _HomeScreenState extends State<HomeScreen>
     'non_drivable',
     'road',
     'roadhazard',
+  };
+
+  static const Set<String> _roadContextLabels = {
+    'road',
+    'drivable',
+    'non_drivable',
+    'lane',
+    'lanemarking',
+    'sidewalk',
+    'crosswalk',
   };
 
   static const Set<String> _roadsideClassLabels = {
@@ -265,56 +300,79 @@ class _HomeScreenState extends State<HomeScreen>
     'roadsideobstacle': 'Obstacle on the side.',
   };
 
-  static const List<double> _defaultDistanceBuckets = [3.0, 6.0, 10.0];
+  static const List<double> _defaultDistanceBuckets = [2.0, 4.0, 5.0];
 
   static const Map<String, List<double>> _distanceBucketsByLabel = {
-    'vehicle': [4.0, 8.0, 12.0],
-    'living': [3.5, 7.0, 10.0],
-    'roadside': [3.5, 7.0, 10.0],
-    'electricpole': [3.5, 7.0, 10.0],
-    'powerpole': [3.5, 7.0, 10.0],
-    'streetlight': [3.5, 7.0, 10.0],
-    'door': [2.5, 5.0, 8.0],
-    'openeddoor': [2.5, 5.0, 8.0],
-    'cabinetdoor': [2.0, 4.0, 6.0],
-    'refrigeratordoor': [2.0, 4.0, 6.0],
-    'window': [2.0, 4.0, 7.0],
-    'chair': [2.0, 4.0, 6.0],
-    'table': [2.0, 4.0, 6.0],
-    'cabinet': [2.0, 4.0, 6.0],
-    'couch': [2.0, 4.0, 6.0],
-    'pole': [3.0, 6.0, 9.0],
-    'vehiclehazard': [4.0, 8.0, 12.0],
-    'humannearby': [3.0, 6.0, 10.0],
-    'animalhazard': [3.0, 6.0, 10.0],
-    'roadhazard': [2.5, 5.0, 8.0],
-    'roadsideobstacle': [3.0, 6.0, 10.0],
+    'vehicle': [2.5, 4.0, 5.0],
+    'living': [2.0, 3.5, 5.0],
+    'roadside': [2.5, 4.0, 5.0],
+    'electricpole': [2.5, 4.0, 5.0],
+    'powerpole': [2.5, 4.0, 5.0],
+    'streetlight': [2.5, 4.0, 5.0],
+    'door': [1.5, 3.0, 5.0],
+    'openeddoor': [1.5, 3.0, 5.0],
+    'cabinetdoor': [1.2, 2.5, 4.0],
+    'refrigeratordoor': [1.2, 2.5, 4.0],
+    'window': [1.5, 3.0, 5.0],
+    'chair': [1.2, 2.5, 4.0],
+    'table': [1.2, 2.5, 4.0],
+    'cabinet': [1.2, 2.5, 4.0],
+    'couch': [1.2, 2.5, 4.0],
+    'pole': [2.5, 4.0, 5.0],
+    'vehiclehazard': [2.5, 4.0, 5.0],
+    'humannearby': [2.0, 3.5, 5.0],
+    'animalhazard': [2.0, 3.5, 5.0],
+    'roadhazard': [2.0, 3.5, 5.0],
+    'roadsideobstacle': [2.5, 4.0, 5.0],
   };
 
   static const Map<String, double> _indoorMinAreaRatio = {
-    'door': 0.03,
-    'openeddoor': 0.03,
-    'cabinetdoor': 0.02,
-    'refrigeratordoor': 0.02,
-    'window': 0.02,
-    'chair': 0.008,
-    'table': 0.01,
-    'cabinet': 0.02,
-    'couch': 0.02,
-    'pole': 0.015,
+    'door': 0.06,
+    'openeddoor': 0.06,
+    'cabinetdoor': 0.04,
+    'refrigeratordoor': 0.04,
+    'window': 0.03,
+    'chair': 0.012,
+    'table': 0.015,
+    'cabinet': 0.03,
+    'couch': 0.03,
+    'pole': 0.025,
   };
 
   static const Map<String, double> _indoorMinConfidenceByLabel = {
-    'door': 0.45,
-    'openeddoor': 0.45,
-    'cabinetdoor': 0.45,
-    'refrigeratordoor': 0.45,
-    'window': 0.45,
-    'cabinet': 0.45,
-    'chair': 0.4,
-    'table': 0.4,
-    'couch': 0.4,
-    'pole': 0.4,
+    'door': 0.65,
+    'openeddoor': 0.65,
+    'cabinetdoor': 0.6,
+    'refrigeratordoor': 0.6,
+    'window': 0.6,
+    'cabinet': 0.6,
+    'chair': 0.55,
+    'table': 0.55,
+    'couch': 0.55,
+    'pole': 0.6,
+  };
+
+  static const Map<String, double> _roadMinConfidenceByLabel = {
+    'vehiclehazard': 0.6,
+    'humannearby': 0.55,
+    'animalhazard': 0.55,
+    'roadhazard': 0.65,
+    'roadsideobstacle': 0.55,
+  };
+
+  static const Map<String, double> _roadMinAreaRatio = {
+    'vehiclehazard': 0.015,
+    'humannearby': 0.012,
+    'animalhazard': 0.01,
+    'roadhazard': 0.015,
+    'roadsideobstacle': 0.012,
+  };
+
+  static const Map<String, double> _indoorMinAspectRatio = {
+    'door': 1.25,
+    'openeddoor': 1.25,
+    'cabinetdoor': 1.0,
+    'refrigeratordoor': 1.2,
   };
 
   static const Map<String, String> _hindiLabels = {
@@ -1200,23 +1258,43 @@ class _HomeScreenState extends State<HomeScreen>
   ) {
     if (detections.isEmpty) return const [];
     final isIndoor = identical(allowedLabels, _indoorAlertLabels);
+    final now = DateTime.now();
+    final hasRoadContext = now.isBefore(_roadContextUntil);
     final alerts = detections.where((d) {
       final normalized = _normalizeLabelForAlert(d.label);
       final minConfidence = isIndoor
           ? (_indoorMinConfidenceByLabel[normalized] ?? _indoorMinConfidence)
-          : _roadMinConfidence;
+          : (_roadMinConfidenceByLabel[normalized] ?? _roadMinConfidence);
       if (d.score < minConfidence) return false;
       if (!allowedLabels.contains(normalized)) return false;
       if (isIndoor) {
         final minArea = _indoorMinAreaRatio[normalized];
         if (minArea != null && d.areaRatio < minArea) return false;
+        if (!_passesAspectRatioForLabel(normalized, d.rect)) return false;
+      } else {
+        final minArea = _roadMinAreaRatio[normalized];
+        if (minArea != null && d.areaRatio < minArea) return false;
+        if (!hasRoadContext) {
+          return false;
+        }
+      }
+      if (!isIndoor && now.isBefore(_indoorContextUntil)) {
+        if (d.score < _roadIndoorContextMinConfidence) return false;
+        return false;
       }
       if (d.distanceMeters != null) {
-        return d.distanceMeters! <= _maxAlertDistance(normalized);
+        return d.distanceMeters! <= _hazardSpeakDistanceMeters;
       }
-      return d.proximity != 'far';
+      return d.proximity == 'near' || d.proximity == 'urgent';
     }).toList();
-    alerts.sort((a, b) {
+    final stableAlerts = _applyTemporalStability(
+      alerts,
+      isIndoor ? _indoorHistory : _roadHistory,
+    );
+    if (isIndoor && stableAlerts.isNotEmpty) {
+      _indoorContextUntil = now.add(_indoorContextHold);
+    }
+    stableAlerts.sort((a, b) {
       final da = a.distanceMeters;
       final db = b.distanceMeters;
       if (da != null && db != null) {
@@ -1226,12 +1304,55 @@ class _HomeScreenState extends State<HomeScreen>
       if (db != null) return 1;
       return b.score.compareTo(a.score);
     });
-    return alerts;
+    return stableAlerts;
   }
 
   String _normalizeLabelForAlert(String label) {
     final lowered = label.trim().toLowerCase();
     return lowered.replaceAll(RegExp(r'[^a-z0-9]+'), '');
+  }
+
+  bool _passesAspectRatioForLabel(String normalized, Rect rect) {
+    final minRatio = _indoorMinAspectRatio[normalized];
+    if (minRatio == null) return true;
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    final ratio = rect.height / rect.width;
+    return ratio >= minRatio;
+  }
+
+  List<YoloDetection> _applyTemporalStability(
+    List<YoloDetection> detections,
+    Map<String, _DetectionHistory> history,
+  ) {
+    if (detections.isEmpty) return <YoloDetection>[];
+    final now = DateTime.now();
+    history.removeWhere((_, value) => now.difference(value.seenAt) > _stabilityWindow);
+    final stable = <YoloDetection>[];
+    for (final det in detections) {
+      final key = _normalizeLabelForAlert(det.label);
+      final prev = history[key];
+      int streak = 1;
+      if (prev != null && now.difference(prev.seenAt) <= _stabilityWindow) {
+        final iou = _rectIoU(prev.rect, det.rect);
+        if (iou >= _stabilityIoU) {
+          streak = prev.streak + 1;
+        }
+      }
+      history[key] = _DetectionHistory(rect: det.rect, seenAt: now, streak: streak);
+      if (streak >= _stabilityTarget) {
+        stable.add(det);
+      }
+    }
+    return stable;
+  }
+
+  double _rectIoU(Rect a, Rect b) {
+    if (!a.overlaps(b)) return 0.0;
+    final intersect = a.intersect(b);
+    final intersectArea = intersect.width * intersect.height;
+    final unionArea = a.width * a.height + b.width * b.height - intersectArea;
+    if (unionArea <= 0) return 0.0;
+    return intersectArea / unionArea;
   }
 
   List<double> _distanceBucketsForLabel(String normalized) {
@@ -1752,6 +1873,7 @@ class _HomeScreenState extends State<HomeScreen>
     if (!_soundEnabled) return;
     if (_voiceAssistant.isListening.value || _voiceAssistant.isSpeaking.value) return;
     final now = DateTime.now();
+    if (now.difference(_lastSignboardSpokenAt) < _signboardPriorityWindow) return;
     if (now.difference(_lastAlertSpokenAt) < _alertSpeakCooldown) return;
 
     final roadAlerts = _filterAlertDetections(_latestDetections, _roadAlertLabels);
@@ -1855,9 +1977,19 @@ class _HomeScreenState extends State<HomeScreen>
         if (rgbImage != null) {
           if (shouldRunRoad) {
             try {
-              final detections = await _yoloDetector.detect(rgbImage);
+              final detections = await _yoloDetector.detect(
+                rgbImage,
+                confThreshold: 0.4,
+              );
               final scaledDetections = _scaleDetectionsToFrame(detections, rgbImage);
-              final darkPatch = _detectDarkPatch(rgbImage);
+              final hasRoadContext = detections.any((d) {
+                final normalized = _normalizeLabelForAlert(d.label);
+                return _roadContextLabels.contains(normalized);
+              });
+              if (hasRoadContext) {
+                _roadContextUntil = DateTime.now().add(_roadContextHold);
+              }
+              final darkPatch = hasRoadContext ? _detectDarkPatch(rgbImage) : null;
               final scaledDarkPatch = darkPatch == null
                   ? null
                   : _scaleDetectionsToFrame([darkPatch], rgbImage).first;
@@ -1888,7 +2020,7 @@ class _HomeScreenState extends State<HomeScreen>
             try {
               final detections = await _indoorDetector.detect(
                 rgbImage,
-                confThreshold: 0.35,
+                confThreshold: 0.45,
               );
               final scaledDetections = _scaleDetectionsToFrame(detections, rgbImage);
               if (mounted) {
