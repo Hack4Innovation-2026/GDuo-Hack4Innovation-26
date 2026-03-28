@@ -18,6 +18,13 @@ import '../services/yolo_detector_service.dart';
 
 enum HomeState { idle, permission, scanning }
 
+class _OcrLine {
+  const _OcrLine(this.text, this.rect);
+
+  final String text;
+  final Rect rect;
+}
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -95,15 +102,15 @@ class _HomeScreenState extends State<HomeScreen>
   DateTime _lastAlertSpokenAt = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastAlertKey = '';
 
-  static const Duration _analysisInterval = Duration(milliseconds: 500);
+  static const Duration _analysisInterval = Duration(milliseconds: 650);
   static const Duration _emitCooldown = Duration(milliseconds: 1500);
   static const Duration _speechCooldown = Duration(seconds: 4);
   static const Duration _alertSpeakCooldown = Duration(seconds: 4);
   static const Duration _geminiCooldown = Duration(seconds: 6);
-  static const Duration _captureHoldDuration = Duration(milliseconds: 900);
+  static const Duration _captureHoldDuration = Duration(milliseconds: 1100);
   static const Duration _captureCooldown = Duration(seconds: 5);
   static const Duration _guidanceCooldown = Duration(seconds: 2);
-  static const double _centerTolerance = 0.12;
+  static const double _centerTolerance = 0.10;
   static const Duration _yoloInterval = Duration(milliseconds: 900);
   static const Duration _conversationRearmDelay = Duration(milliseconds: 600);
   static const Duration _intentCooldown = Duration(seconds: 6);
@@ -763,14 +770,25 @@ class _HomeScreenState extends State<HomeScreen>
         (camera) => camera.lensDirection == CameraLensDirection.back,
         orElse: () => cameras.first,
       );
-      final controller = CameraController(
-        selectedCamera,
-        ResolutionPreset.medium,
-        enableAudio: false,
-        imageFormatGroup: Platform.isIOS ? ImageFormatGroup.bgra8888 : ImageFormatGroup.yuv420,
-      );
+      CameraController controller;
+      try {
+        controller = CameraController(
+          selectedCamera,
+          ResolutionPreset.high,
+          enableAudio: false,
+          imageFormatGroup: Platform.isIOS ? ImageFormatGroup.bgra8888 : ImageFormatGroup.yuv420,
+        );
+        await controller.initialize();
+      } catch (_) {
+        controller = CameraController(
+          selectedCamera,
+          ResolutionPreset.medium,
+          enableAudio: false,
+          imageFormatGroup: Platform.isIOS ? ImageFormatGroup.bgra8888 : ImageFormatGroup.yuv420,
+        );
+        await controller.initialize();
+      }
       _cameraController = controller;
-      await controller.initialize();
       if (!mounted) return;
       setState(() {
         _cameraReady = true;
@@ -1354,13 +1372,17 @@ class _HomeScreenState extends State<HomeScreen>
     try {
       final inputImage = _inputImageFromCameraImage(image);
       if (inputImage == null) return;
-      final results = await Future.wait([
-        _latinTextRecognizer.processImage(inputImage),
-        _devanagariTextRecognizer.processImage(inputImage),
-        _tamilTextRecognizer.processImage(inputImage),
-      ]);
-      final mergedText = _mergeRecognizedText(results);
+      final recognizers = _activeRecognizers();
+      if (recognizers.isEmpty) return;
+      final results = await Future.wait(
+        recognizers.map((recognizer) => recognizer.processImage(inputImage)),
+      );
       final mergedRect = _mergeBoundingBoxes(results);
+      final mergedText = _mergeRecognizedText(
+        results,
+        focusRect: mergedRect,
+        imageSize: _lastFrameSize,
+      );
       if (_pendingConversationQuestion != null && !_conversationInFlight) {
         final question = _pendingConversationQuestion!;
         _pendingConversationQuestion = null;
@@ -1534,33 +1556,103 @@ class _HomeScreenState extends State<HomeScreen>
     return buffer.done().buffer.asUint8List();
   }
 
-  String _mergeRecognizedText(List<RecognizedText> results) {
-    final seen = <String>{};
-    final merged = <String>[];
+  List<TextRecognizer> _activeRecognizers() {
+    switch (_selectedLanguage) {
+      case 'Hindi':
+        return [_latinTextRecognizer, _devanagariTextRecognizer];
+      case 'Tamil':
+        return [_latinTextRecognizer, _tamilTextRecognizer];
+      default:
+        return [_latinTextRecognizer];
+    }
+  }
+
+  String _mergeRecognizedText(
+    List<RecognizedText> results, {
+    Rect? focusRect,
+    Size? imageSize,
+  }) {
+    final lines = <_OcrLine>[];
     for (final result in results) {
-      final text = result.text.trim();
-      if (text.isEmpty) continue;
-      final normalized = _normalizeText(text);
-      if (seen.add(normalized)) {
-        merged.add(text);
+      for (final block in result.blocks) {
+        if (block.lines.isEmpty) {
+          final text = block.text.trim();
+          if (text.isNotEmpty) {
+            lines.add(_OcrLine(text, block.boundingBox));
+          }
+          continue;
+        }
+        for (final line in block.lines) {
+          final text = line.text.trim();
+          if (text.isNotEmpty) {
+            lines.add(_OcrLine(text, line.boundingBox));
+          }
+        }
       }
     }
-    return merged.join('\n').trim();
+
+    if (lines.isEmpty) return '';
+
+    final filtered = <_OcrLine>[];
+    final seen = <String>{};
+
+    final double? minHeight =
+        imageSize == null ? null : imageSize.height * 0.012;
+    final double? minWidth =
+        imageSize == null ? null : imageSize.width * 0.06;
+    final bool restrictToFocus = focusRect != null &&
+        imageSize != null &&
+        (focusRect.width * focusRect.height) /
+                (imageSize.width * imageSize.height) >=
+            0.02;
+
+    for (final line in lines) {
+      final text = line.text.trim();
+      if (text.isEmpty) continue;
+      if (_isNoiseLine(text)) continue;
+
+      if (minHeight != null && minWidth != null) {
+        if (line.rect.height < minHeight && line.rect.width < minWidth) {
+          continue;
+        }
+      }
+
+      if (restrictToFocus && focusRect != null) {
+        final overlap = _rectIntersectionRatio(line.rect, focusRect);
+        if (overlap < 0.35) {
+          continue;
+        }
+      }
+
+      final normalized = _normalizeText(text);
+      if (normalized.isEmpty) continue;
+      if (!seen.add(normalized)) continue;
+      filtered.add(line);
+    }
+
+    if (filtered.isEmpty) return '';
+
+    filtered.sort((a, b) {
+      final dy = a.rect.top - b.rect.top;
+      if (dy.abs() > (a.rect.height + b.rect.height) * 0.25) {
+        return dy.sign.toInt();
+      }
+      return (a.rect.left - b.rect.left).sign.toInt();
+    });
+
+    return filtered.map((line) => line.text).join('\n').trim();
   }
 
   Rect? _mergeBoundingBoxes(List<RecognizedText> results) {
     Rect? merged;
     for (final result in results) {
       for (final block in result.blocks) {
-        final rect = block.boundingBox;
-        if (merged == null) {
-          merged = rect;
+        if (block.lines.isEmpty) {
+          merged = _mergeRect(merged, block.boundingBox);
         } else {
-          final left = merged.left < rect.left ? merged.left : rect.left;
-          final top = merged.top < rect.top ? merged.top : rect.top;
-          final right = merged.right > rect.right ? merged.right : rect.right;
-          final bottom = merged.bottom > rect.bottom ? merged.bottom : rect.bottom;
-          merged = Rect.fromLTRB(left, top, right, bottom);
+          for (final line in block.lines) {
+            merged = _mergeRect(merged, line.boundingBox);
+          }
         }
       }
     }
@@ -1594,7 +1686,7 @@ class _HomeScreenState extends State<HomeScreen>
     String message;
     if (focusRect == null || !hasText) {
       message = 'Point at a signboard.';
-    } else if (areaRatio < 0.03) {
+    } else if (areaRatio < 0.02) {
       message = 'Move closer to fill the signboard.';
     } else if (!isCentered) {
       message = _directionGuidance(focusRect, frameSize);
@@ -1677,6 +1769,29 @@ class _HomeScreenState extends State<HomeScreen>
     final intersection = overlapWidth * overlapHeight;
     final union = a.width * a.height + b.width * b.height - intersection;
     return union <= 0 ? 0 : intersection / union;
+  }
+
+  Rect? _mergeRect(Rect? merged, Rect rect) {
+    if (merged == null) return rect;
+    final left = merged.left < rect.left ? merged.left : rect.left;
+    final top = merged.top < rect.top ? merged.top : rect.top;
+    final right = merged.right > rect.right ? merged.right : rect.right;
+    final bottom = merged.bottom > rect.bottom ? merged.bottom : rect.bottom;
+    return Rect.fromLTRB(left, top, right, bottom);
+  }
+
+  double _rectIntersectionRatio(Rect a, Rect b) {
+    final left = a.left > b.left ? a.left : b.left;
+    final top = a.top > b.top ? a.top : b.top;
+    final right = a.right < b.right ? a.right : b.right;
+    final bottom = a.bottom < b.bottom ? a.bottom : b.bottom;
+    final overlapWidth = right - left;
+    final overlapHeight = bottom - top;
+    if (overlapWidth <= 0 || overlapHeight <= 0) return 0;
+    final intersection = overlapWidth * overlapHeight;
+    final area = a.width * a.height;
+    if (area <= 0) return 0;
+    return intersection / area;
   }
 
   Future<void> _announceAndCaptureFromFrame(
@@ -2175,7 +2290,7 @@ class _HomeScreenState extends State<HomeScreen>
       cropRect: cropRect,
       originalSize: Size(width.toDouble(), height.toDouble()),
     );
-    return Uint8List.fromList(img.encodeJpg(outputImage, quality: 75));
+    return Uint8List.fromList(img.encodeJpg(outputImage, quality: 85));
   }
 
   Uint8List? _buildJpegFromYuv420(CameraImage image, {Rect? cropRect}) {
@@ -2220,7 +2335,7 @@ class _HomeScreenState extends State<HomeScreen>
       cropRect: cropRect,
       originalSize: Size(width.toDouble(), height.toDouble()),
     );
-    return Uint8List.fromList(img.encodeJpg(outputImage, quality: 70));
+    return Uint8List.fromList(img.encodeJpg(outputImage, quality: 85));
   }
 
   img.Image _cropImageIfNeeded(
