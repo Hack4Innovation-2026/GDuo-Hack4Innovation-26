@@ -24,17 +24,39 @@ class GeminiService {
 
   bool get hasApiKey => _apiKey.isNotEmpty;
 
-  static const String _systemInstruction =
-      'You are a smart reading assistant for a blind user. From the text and image given, '
-      'speak only what is useful and actionable in one short sentence (<= 12 words). '
-      'Prefer the main sign name, directions, and emergency/parking instructions. '
-      'Ignore ads, decorative text, legal disclaimers, UI labels, and repeated info. '
-      'Never include URLs or app names. If a phone number or price exists, surface it '
-      'clearly. If nothing useful exists, return an empty string and stay silent.';
+  static const String _systemInstruction = '''
+You are DrishtiAI. Read signboards for a blind user.
+Use OCR text and the image to infer the signboard's core meaning.
+Respond in the preferred language if provided; otherwise match the dominant OCR script (Devanagari -> Hindi/Marathi, Tamil -> Tamil, Latin -> English).
+Output ONE concise sentence (<= 25 words).
+If emergency/danger/ambulance/fire/police appears, mention it first and include direction if present.
+Include organization/place name, key services (emergency/admissions/parking), and phone numbers when present.
+Do not only read the header; include key items from all lines if present.
+Ignore ads, slogans, URLs, app/browser UI, search results, watermarks, legal disclaimers, repeated lines, and noise.
+If nothing meaningful is found, return {"speak":"","action":null}.
+Return ONLY strict JSON: {"speak":"...","action":null} or {"speak":"...","action":{"type":"call|maps","value":"..."}}.
+''';
+
+  static const String _conversationInstruction = '''
+You are DrishtiAI. Answer the user's question using the OCR text and the image.
+Be concise and directly answer the question in one sentence (<= 25 words).
+If the answer is not visible or cannot be inferred, say you cannot see it.
+Respond in the preferred language if provided; otherwise match the dominant OCR script.
+Ignore ads, slogans, URLs, app/browser UI, search results, watermarks, legal disclaimers, repeated lines, and noise.
+Return ONLY strict JSON: {"speak":"...","action":null} or {"speak":"...","action":{"type":"call|maps","value":"..."}}.
+''';
+
+  static const String _intentInstruction = '''
+You are DrishtiAI. Determine if the signboard matches the user's intent.
+Use the OCR text and image context. Consider synonyms (e.g., medical store/pharmacy/chemist).
+Return strict JSON only: {"match":true,"category":"medical"} or {"match":false}.
+If unclear, return {"match":false}.
+''';
 
   Future<GeminiResult?> analyze({
     required String ocrText,
     required Uint8List jpegBytes,
+    String? preferredLanguage,
   }) async {
     if (_apiKey.isEmpty) {
       // Avoid spamming logs on every frame.
@@ -45,11 +67,16 @@ class GeminiService {
       'https://generativelanguage.googleapis.com/v1beta/models/$_model:generateContent?key=$_apiKey',
     );
 
+    final languageHint = (preferredLanguage == null || preferredLanguage!.trim().isEmpty)
+        ? 'Auto'
+        : preferredLanguage!.trim();
     final prompt = '''
 OCR TEXT:
 $ocrText
 
-Return ONLY valid JSON in this exact shape:
+Preferred language: $languageHint
+
+Return ONLY JSON (no markdown, no extra keys):
 {"speak":"...","action":null}
 or
 {"speak":"...","action":{"type":"call","value":"..."}}
@@ -79,8 +106,8 @@ If nothing useful exists, return {"speak":"","action":null}.
         },
       ],
       'generation_config': {
-        'temperature': 0.2,
-        'max_output_tokens': 200,
+        'temperature': 0.1,
+        'max_output_tokens': 120,
       },
     });
 
@@ -118,6 +145,187 @@ If nothing useful exists, return {"speak":"","action":null}.
     return parsed;
   }
 
+  Future<GeminiResult?> analyzeConversation({
+    required String question,
+    required String ocrText,
+    required Uint8List jpegBytes,
+    String? preferredLanguage,
+  }) async {
+    if (_apiKey.isEmpty) {
+      return null;
+    }
+
+    final uri = Uri.parse(
+      'https://generativelanguage.googleapis.com/v1beta/models/$_model:generateContent?key=$_apiKey',
+    );
+
+    final languageHint = (preferredLanguage == null || preferredLanguage.trim().isEmpty)
+        ? 'Auto'
+        : preferredLanguage.trim();
+    final prompt = '''
+USER QUESTION:
+$question
+
+OCR TEXT:
+$ocrText
+
+Preferred language: $languageHint
+
+Return ONLY JSON (no markdown, no extra keys):
+{"speak":"...","action":null}
+or
+{"speak":"...","action":{"type":"call","value":"..."}}
+or
+{"speak":"...","action":{"type":"maps","value":"..."}}
+If nothing useful exists, return {"speak":"","action":null}.
+''';
+
+    final body = jsonEncode({
+      'systemInstruction': {
+        'parts': [
+          {'text': _conversationInstruction},
+        ],
+      },
+      'contents': [
+        {
+          'role': 'user',
+          'parts': [
+            {'text': prompt},
+            {
+              'inline_data': {
+                'mime_type': 'image/jpeg',
+                'data': base64Encode(jpegBytes),
+              },
+            },
+          ],
+        },
+      ],
+      'generation_config': {
+        'temperature': 0.2,
+        'max_output_tokens': 140,
+      },
+    });
+
+    final response = await http.post(
+      uri,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: body,
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception('Gemini HTTP ${response.statusCode}');
+    }
+
+    final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+    final candidates = decoded['candidates'] as List<dynamic>?;
+    if (candidates == null || candidates.isEmpty) {
+      return null;
+    }
+    final content = candidates.first['content'] as Map<String, dynamic>?;
+    final parts = content?['parts'] as List<dynamic>?;
+    if (parts == null || parts.isEmpty) {
+      return null;
+    }
+    final rawText = parts.first['text']?.toString() ?? '';
+    if (rawText.isEmpty) {
+      return null;
+    }
+
+    final parsed = _parseJson(rawText);
+    if (parsed == null) {
+      throw Exception('Unable to parse Gemini JSON response.');
+    }
+    return parsed;
+  }
+
+  Future<IntentMatch?> analyzeIntent({
+    required String intent,
+    required String ocrText,
+    required Uint8List jpegBytes,
+  }) async {
+    if (_apiKey.isEmpty) {
+      return null;
+    }
+
+    final uri = Uri.parse(
+      'https://generativelanguage.googleapis.com/v1beta/models/$_model:generateContent?key=$_apiKey',
+    );
+
+    final prompt = '''
+USER INTENT:
+$intent
+
+OCR TEXT:
+$ocrText
+
+Return ONLY JSON:
+{"match":true,"category":"..."}
+or
+{"match":false}
+''';
+
+    final body = jsonEncode({
+      'systemInstruction': {
+        'parts': [
+          {'text': _intentInstruction},
+        ],
+      },
+      'contents': [
+        {
+          'role': 'user',
+          'parts': [
+            {'text': prompt},
+            {
+              'inline_data': {
+                'mime_type': 'image/jpeg',
+                'data': base64Encode(jpegBytes),
+              },
+            },
+          ],
+        },
+      ],
+      'generation_config': {
+        'temperature': 0.1,
+        'max_output_tokens': 60,
+      },
+    });
+
+    final response = await http.post(
+      uri,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: body,
+    );
+
+    if (response.statusCode != 200) {
+      throw Exception('Gemini HTTP ${response.statusCode}');
+    }
+
+    final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+    final candidates = decoded['candidates'] as List<dynamic>?;
+    if (candidates == null || candidates.isEmpty) {
+      return null;
+    }
+    final content = candidates.first['content'] as Map<String, dynamic>?;
+    final parts = content?['parts'] as List<dynamic>?;
+    if (parts == null || parts.isEmpty) {
+      return null;
+    }
+    final rawText = parts.first['text']?.toString() ?? '';
+    if (rawText.isEmpty) {
+      return null;
+    }
+
+    final parsed = _parseIntentJson(rawText);
+    if (parsed == null) {
+      throw Exception('Unable to parse Gemini intent JSON response.');
+    }
+    return parsed;
+  }
+
   GeminiResult? _parseJson(String rawText) {
     final start = rawText.indexOf('{');
     final end = rawText.lastIndexOf('}');
@@ -139,6 +347,21 @@ If nothing useful exists, return {"speak":"","action":null}.
     }
     return GeminiResult(speak: speak, action: parsedAction);
   }
+
+  IntentMatch? _parseIntentJson(String rawText) {
+    final start = rawText.indexOf('{');
+    final end = rawText.lastIndexOf('}');
+    if (start == -1 || end == -1 || end <= start) {
+      return null;
+    }
+    final jsonText = rawText.substring(start, end + 1);
+    final decoded = jsonDecode(jsonText);
+    if (decoded is! Map<String, dynamic>) return null;
+    final match = decoded['match'];
+    if (match is! bool) return null;
+    final category = decoded['category']?.toString();
+    return IntentMatch(match: match, category: category);
+  }
 }
 
 class GeminiResult {
@@ -153,4 +376,11 @@ class GeminiAction {
 
   final String type;
   final String value;
+}
+
+class IntentMatch {
+  IntentMatch({required this.match, this.category});
+
+  final bool match;
+  final String? category;
 }

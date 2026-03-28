@@ -76,6 +76,7 @@ class VoiceAssistantService {
     _localeId = localeId;
     _ttsLanguage = _languageForTts(localeId);
     await _tts.setLanguage(_ttsLanguage);
+    await _applyVoiceForLocale(_ttsLanguage);
   }
 
   Future<void> speak(String text) async {
@@ -85,13 +86,17 @@ class VoiceAssistantService {
     }
     lastError.value = null;
     await _tts.stop();
-    await _tts.speak(text);
+    final result = await _tts.speak(text);
+    if ((result is int && result == 0) || (result is bool && result == false)) {
+      lastError.value = 'Unable to start speech synthesis.';
+      isSpeaking.value = false;
+    }
   }
 
   Future<void> onSignboardDetected(
-    String label, {
-    required Future<void> Function(String text) onUserResponse,
-  }) async {
+      String label, {
+        required Future<void> Function(String text) onUserResponse,
+      }) async {
     if (_isBusy) return;
     if (!_initialized) {
       await initialize(localeId: _localeId);
@@ -110,18 +115,49 @@ class VoiceAssistantService {
     }
   }
 
+  Future<void> requestUserQuery({
+    String? prompt,
+    required Future<void> Function(String text) onUserResponse,
+  }) async {
+    if (_isBusy) return;
+    if (!_initialized) {
+      await initialize(localeId: _localeId);
+    }
+    _isBusy = true;
+    lastError.value = null;
+    liveTranscript.value = '';
+
+    if (prompt != null && prompt.trim().isNotEmpty) {
+      _pendingUserResponse = onUserResponse;
+      final result = await _tts.speak(prompt);
+      if ((result is int && result == 0) || (result is bool && result == false)) {
+        _isBusy = false;
+        _pendingUserResponse = null;
+        lastError.value = 'Unable to start speech synthesis.';
+      }
+      return;
+    }
+
+    await _startListening(onUserResponse);
+    liveTranscript.value = '';
+    _isBusy = false;
+  }
+
   Future<void> _configureTts() async {
     try {
       await _tts.setEngine('com.google.android.tts');
-    } catch (_) {
-      // Best-effort: if Google engine isn't available, keep default.
-    }
+    } catch (_) {}
     try {
       await _tts.awaitSpeakCompletion(true);
-    } catch (_) {
-      // Some platforms do not support awaitSpeakCompletion.
+    } catch (_) {}
+
+    final languageAvailable = await _tts.isLanguageAvailable(_ttsLanguage);
+    if (languageAvailable is bool && !languageAvailable) {
+      _ttsLanguage = 'en-US';
     }
+
     await _tts.setLanguage(_ttsLanguage);
+    await _tts.setVolume(1.0);
     await _tts.setSpeechRate(0.5);
     await _tts.setPitch(1.0);
     _tts.setStartHandler(() {
@@ -262,5 +298,36 @@ class VoiceAssistantService {
       if (message != null) return message.toString();
     }
     return error.toString();
+  }
+  Future<void> _applyVoiceForLocale(String ttsLanguage) async {
+    try {
+      final voices = await _tts.getVoices;
+      if (voices is! List) return;
+      final normalized = ttsLanguage.toLowerCase();
+      Map<String, dynamic>? match;
+      for (final v in voices) {
+        if (v is! Map) continue;
+        final locale = (v['locale'] ?? '').toString().toLowerCase();
+        if (locale == normalized) {
+          match = Map<String, dynamic>.from(v);
+          break;
+        }
+      }
+      match ??= voices.firstWhere(
+            (v) => v is Map && ((v['locale'] ?? '').toString().toLowerCase().startsWith(normalized.split('-').first)),
+        orElse: () => null,
+      );
+      if (match != null) {
+        final voice = <String, String>{
+          'name': (match['name'] ?? '').toString(),
+          'locale': (match['locale'] ?? '').toString(),
+        };
+        if (voice['name']!.isNotEmpty && voice['locale']!.isNotEmpty) {
+          await _tts.setVoice(voice);
+        }
+      }
+    } catch (_) {
+      // Ignore voice selection errors
+    }
   }
 }

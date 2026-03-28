@@ -80,7 +80,7 @@ class DrishtiApp extends ConsumerWidget {
           color: const Color(0xFF1A1A1A),
         ),
       ),
-      cardTheme: const CardThemeData(
+      cardTheme: const CardTheme(
         color: Color(0xFFFFFFFF),
         elevation: 2,
         shadowColor: Colors.black12,
