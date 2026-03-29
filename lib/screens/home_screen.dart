@@ -37,6 +37,14 @@ class _OcrLine {
   final Rect rect;
 }
 
+class _MenuItem {
+  _MenuItem(this.name, this.price, this.currency);
+
+  final String name;
+  final double price;
+  final String currency;
+}
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -96,7 +104,6 @@ class _HomeScreenState extends State<HomeScreen>
   String _lastGeminiText = '';
   bool _geminiInFlight = false;
   bool _latestSmartEmpty = false;
-  bool _isCapturing = false;
   bool _conversationModeEnabled = false;
   bool _conversationInFlight = false;
   String? _pendingConversationQuestion;
@@ -107,14 +114,8 @@ class _HomeScreenState extends State<HomeScreen>
   DateTime _lastIntentCall = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastIntentSpokenTime = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastIntentKey = '';
-  DateTime _lastCaptureTime = DateTime.fromMillisecondsSinceEpoch(0);
-  Rect? _lastFocusRect;
-  DateTime _focusStableSince = DateTime.fromMillisecondsSinceEpoch(0);
-  bool _detectedAnnounced = false;
-  DateTime _lastGuidanceTime = DateTime.fromMillisecondsSinceEpoch(0);
-  String _lastGuidanceText = '';
-  String _currentGuidanceText = '';
-  bool _holdAnnounced = false;
+  String _lastIntentOcrText = '';
+  String _lastSignboardIntentOcr = ''; // Only set from signboard-cropped OCR
   Size? _lastFrameSize;
   DateTime _lastAlertSpokenAt = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastAlertKey = '';
@@ -132,14 +133,23 @@ class _HomeScreenState extends State<HomeScreen>
   static const Duration _alertSpeakCooldown = Duration(seconds: 4);
   static const Duration _signboardPriorityWindow = Duration(seconds: 5);
   static const Duration _geminiCooldown = Duration(seconds: 6);
-  static const Duration _captureHoldDuration = Duration(milliseconds: 1100);
-  static const Duration _captureCooldown = Duration(seconds: 5);
-  static const Duration _guidanceCooldown = Duration(seconds: 2);
-  static const double _centerTolerance = 0.10;
-  static const Duration _yoloInterval = Duration(milliseconds: 900);
   static const Duration _conversationRearmDelay = Duration(milliseconds: 600);
   static const Duration _intentCooldown = Duration(seconds: 6);
   static const Duration _intentScanInterval = Duration(seconds: 2);
+  static const Map<String, String> _intentCategoryNames = {
+    'medical': 'Medical store',
+    'hospital': 'Hospital',
+    'restaurant': 'Restaurant',
+    'grocery': 'Grocery store',
+    'bank': 'Bank',
+    'hotel': 'Hotel',
+    'school': 'School',
+    'temple': 'Temple',
+    'mosque': 'Mosque',
+    'church': 'Church',
+    'police': 'Police station',
+    'fuel': 'Fuel station',
+  };
   static const Map<String, List<String>> _intentKeywordHints = {
     'medical': ['medical', 'pharmacy', 'chemist', 'drug', 'drugs', 'medicine', 'pharma'],
     'hospital': ['hospital', 'clinic', 'emergency', 'er', 'casualty'],
@@ -154,11 +164,12 @@ class _HomeScreenState extends State<HomeScreen>
     'police': ['police', 'station', 'ps'],
     'fuel': ['fuel', 'petrol', 'diesel', 'gas', 'pump', 'filling'],
   };
+  static const Duration _yoloInterval = Duration(milliseconds: 900);
   static const int _yoloFrameStride = 4;
   static const int _indoorFrameStride = 4;
   static const int _indoorFrameOffset = 2;
-  static const Duration _signboardInterval = Duration(milliseconds: 1200);
-  static const int _signboardFrameStride = 5;
+  static const Duration _signboardInterval = Duration(milliseconds: 900);
+  static const int _signboardFrameStride = 4;
   static const int _signboardFrameOffset = 1;
   static const Duration _signboardSpeakCooldown = Duration(seconds: 6);
   static const Duration _signboardLandmarkHold = Duration(seconds: 2);
@@ -723,10 +734,6 @@ class _HomeScreenState extends State<HomeScreen>
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (_currentGuidanceText.isNotEmpty) ...[
-                _buildGuidanceOverlay(),
-                const SizedBox(height: 12),
-              ],
               _buildVoiceOverlay(),
               if (_latestGeminiError != null || _latestSmartText.isNotEmpty || _latestOcrText.isNotEmpty) ...[
                 const SizedBox(height: 12),
@@ -794,38 +801,6 @@ class _HomeScreenState extends State<HomeScreen>
           fontWeight: FontWeight.w600,
           color: Colors.white,
         ),
-      ),
-    );
-  }
-
-  Widget _buildGuidanceOverlay() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
-        color: Colors.black.withValues(alpha: 0.8),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: const Color(0xFFB3D4FF).withValues(alpha: 0.9),
-          width: 1,
-        ),
-      ),
-      child: Row(
-        children: [
-          const Icon(Icons.center_focus_strong, color: Color(0xFFB3D4FF), size: 20),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              _currentGuidanceText,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: GoogleFonts.outfit(
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
-                color: Colors.white,
-              ),
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -1069,25 +1044,14 @@ class _HomeScreenState extends State<HomeScreen>
         (camera) => camera.lensDirection == CameraLensDirection.back,
         orElse: () => cameras.first,
       );
-      CameraController controller;
-      try {
-        controller = CameraController(
-          selectedCamera,
-          ResolutionPreset.high,
-          enableAudio: false,
-          imageFormatGroup: Platform.isIOS ? ImageFormatGroup.bgra8888 : ImageFormatGroup.yuv420,
-        );
-        await controller.initialize();
-      } catch (_) {
-        controller = CameraController(
-          selectedCamera,
-          ResolutionPreset.medium,
-          enableAudio: false,
-          imageFormatGroup: Platform.isIOS ? ImageFormatGroup.bgra8888 : ImageFormatGroup.yuv420,
-        );
-        await controller.initialize();
-      }
+      final controller = CameraController(
+        selectedCamera,
+        ResolutionPreset.medium,
+        enableAudio: false,
+        imageFormatGroup: Platform.isIOS ? ImageFormatGroup.bgra8888 : ImageFormatGroup.yuv420,
+      );
       _cameraController = controller;
+      await controller.initialize();
       if (!mounted) return;
       setState(() {
         _cameraReady = true;
@@ -1192,18 +1156,6 @@ class _HomeScreenState extends State<HomeScreen>
         _cameraController = null;
         _cameraReady = false;
         _isStreaming = false;
-        _isCapturing = false;
-        _latestOcrText = '';
-        _latestSmartText = '';
-        _latestSmartEmpty = false;
-        _latestGeminiError = null;
-        _lastFocusRect = null;
-        _focusStableSince = DateTime.fromMillisecondsSinceEpoch(0);
-        _detectedAnnounced = false;
-        _lastGuidanceTime = DateTime.fromMillisecondsSinceEpoch(0);
-        _lastGuidanceText = '';
-        _currentGuidanceText = '';
-        _holdAnnounced = false;
         _conversationModeEnabled = false;
         _conversationInFlight = false;
         _pendingConversationQuestion = null;
@@ -1214,6 +1166,8 @@ class _HomeScreenState extends State<HomeScreen>
         _lastIntentCall = DateTime.fromMillisecondsSinceEpoch(0);
         _lastIntentSpokenTime = DateTime.fromMillisecondsSinceEpoch(0);
         _lastIntentKey = '';
+        _lastIntentOcrText = '';
+        _lastSignboardIntentOcr = '';
       });
       WidgetsBinding.instance.addPostFrameCallback((_) {
         unawaited(_disposeController(controller));
@@ -1224,6 +1178,98 @@ class _HomeScreenState extends State<HomeScreen>
     _cameraReady = false;
     _isStreaming = false;
     unawaited(_disposeController(controller));
+  }
+
+  Future<void> _toggleConversationMode() async {
+    final enable = !_conversationModeEnabled;
+    if (mounted) {
+      setState(() {
+        _conversationModeEnabled = enable;
+        if (enable) {
+          _intentModeEnabled = false;
+          _intentInFlight = false;
+          _pendingIntentQuery = null;
+          _activeIntentQuery = null;
+        }
+      });
+    }
+    if (!enable) {
+      _pendingConversationQuestion = null;
+      _conversationInFlight = false;
+      await _voiceAssistant.stop();
+      return;
+    }
+    if (_intentModeEnabled) {
+      _intentModeEnabled = false;
+      _activeIntentQuery = null;
+    }
+    await _requestConversationQuestion(initialPrompt: true);
+  }
+
+  Future<void> _toggleIntentMode() async {
+    final enable = !_intentModeEnabled;
+    if (mounted) {
+      setState(() {
+        _intentModeEnabled = enable;
+        if (enable) {
+          _conversationModeEnabled = false;
+          _conversationInFlight = false;
+          _pendingConversationQuestion = null;
+        }
+      });
+    }
+    if (!enable) {
+      _pendingIntentQuery = null;
+      _activeIntentQuery = null;
+      _intentInFlight = false;
+      await _voiceAssistant.stop();
+      return;
+    }
+    if (_conversationModeEnabled) {
+      _conversationModeEnabled = false;
+    }
+    await _requestIntentQuery(initialPrompt: true);
+  }
+
+  Future<void> _requestConversationQuestion({required bool initialPrompt}) async {
+    if (!_cameraReady) {
+      if (_soundEnabled) {
+        await _voiceAssistant.speak('Camera is not ready yet.');
+      }
+      return;
+    }
+    final prompt = initialPrompt
+        ? 'Conversation mode on. Ask your question.'
+        : 'Ask another question.';
+    await _voiceAssistant.requestUserQuery(
+      prompt: _soundEnabled ? prompt : null,
+      onUserResponse: (text) async {
+        final trimmed = text.trim();
+        if (trimmed.isEmpty) return;
+        _pendingConversationQuestion = trimmed;
+      },
+    );
+  }
+
+  Future<void> _requestIntentQuery({required bool initialPrompt}) async {
+    if (!_cameraReady) {
+      if (_soundEnabled) {
+        await _voiceAssistant.speak('Camera is not ready yet.');
+      }
+      return;
+    }
+    final prompt = initialPrompt
+        ? 'Intent search on. What are you looking for?'
+        : 'What should I look for?';
+    await _voiceAssistant.requestUserQuery(
+      prompt: _soundEnabled ? prompt : null,
+      onUserResponse: (text) async {
+        final trimmed = text.trim();
+        if (trimmed.isEmpty) return;
+        _pendingIntentQuery = trimmed;
+        _activeIntentQuery = trimmed;
+      },
+    );
   }
 
   Widget _buildSmartOverlay() {
@@ -1734,7 +1780,7 @@ class _HomeScreenState extends State<HomeScreen>
     if (results.isEmpty) return '';
     final rects = _getActiveSignboardRects(signboards);
     if (rects.isEmpty) return '';
-    final lines = <String>[];
+    final candidates = <_OcrLine>[];
     final seen = <String>{};
 
     Rect? bestRectFor(Rect rect, double minOverlap) {
@@ -1756,34 +1802,64 @@ class _HomeScreenState extends State<HomeScreen>
 
     for (final result in results) {
       for (final block in result.blocks) {
-        final box = block.boundingBox;
-        if (box == null) continue;
-        final bestRect = bestRectFor(box, 0.35);
-        if (bestRect == null) continue;
-        final heightRatio = box.height / bestRect.height;
-        if (heightRatio < 0.04 || heightRatio > 0.9) continue;
-        final raw = block.text.trim();
-        if (raw.isEmpty) continue;
-        if (!_lineLooksValid(raw)) continue;
-        if (seen.add(raw)) {
-          lines.add(raw);
+        for (final line in block.lines) {
+          final box = line.boundingBox;
+          if (box == null) continue;
+          final bestRect = bestRectFor(box, 0.2);
+          if (bestRect == null) continue;
+          final heightRatio = box.height / bestRect.height;
+          if (heightRatio < 0.03 || heightRatio > 0.95) continue;
+          final raw = line.text.trim();
+          if (raw.isEmpty) continue;
+          if (!_lineLooksValid(raw)) continue;
+          final key = _normalizeText(raw);
+          if (key.isEmpty || !seen.add(key)) continue;
+          candidates.add(_OcrLine(raw, box));
         }
       }
     }
-    final text = lines.join(' ').trim();
+
+    if (candidates.isEmpty) {
+      for (final result in results) {
+        for (final block in result.blocks) {
+          final box = block.boundingBox;
+          if (box == null) continue;
+          final bestRect = bestRectFor(box, 0.2);
+          if (bestRect == null) continue;
+          final heightRatio = box.height / bestRect.height;
+          if (heightRatio < 0.03 || heightRatio > 0.95) continue;
+          final raw = block.text.trim();
+          if (raw.isEmpty) continue;
+          if (!_lineLooksValid(raw)) continue;
+          final key = _normalizeText(raw);
+          if (key.isEmpty || !seen.add(key)) continue;
+          candidates.add(_OcrLine(raw, box));
+        }
+      }
+    }
+
+    candidates.sort((a, b) {
+      final dy = (a.rect.top - b.rect.top).abs();
+      if (dy > 12) {
+        return a.rect.top.compareTo(b.rect.top);
+      }
+      return a.rect.left.compareTo(b.rect.left);
+    });
+
+    final text = candidates.map((line) => line.text).join(' ').trim();
     return _shortenSignboardText(_cleanSignboardText(text));
   }
 
   List<Rect> _getActiveSignboardRects(List<YoloDetection> signboards) {
     if (signboards.isNotEmpty) {
-      return signboards.map((d) => _expandRect(d.rect, 0.08)).toList();
+      return signboards.map((d) => _expandRect(d.rect, 0.15)).toList();
     }
     final now = DateTime.now();
     if (_signboardLandmark == null) return const [];
     if (now.difference(_signboardLandmarkAt) > _signboardLandmarkHold) {
       return const [];
     }
-    return [_expandRect(_signboardLandmark!, 0.1)];
+    return [_expandRect(_signboardLandmark!, 0.18)];
   }
 
   Rect _expandRect(Rect rect, double padRatio) {
@@ -1817,8 +1893,8 @@ class _HomeScreenState extends State<HomeScreen>
     if (text.isEmpty) return text;
     final cleaned = text.replaceAll(RegExp(r'\s+'), ' ').trim();
     final words = cleaned.split(' ');
-    if (words.length <= 8) return cleaned;
-    return words.take(8).join(' ');
+    if (words.length <= 12) return cleaned;
+    return words.take(12).join(' ');
   }
 
   String _cleanSignboardText(String text) {
@@ -1837,7 +1913,7 @@ class _HomeScreenState extends State<HomeScreen>
     final cleaned = text.replaceAll(RegExp(r'[^A-Za-z0-9\u0900-\u097F]'), '');
     if (cleaned.length < 2) return false;
     final ratio = cleaned.length / text.length;
-    if (ratio < 0.45) return false;
+    if (ratio < 0.35) return false;
     return true;
   }
 
@@ -1865,6 +1941,9 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _speakSignboard(String text, YoloDetection detection) async {
+    if (_conversationModeEnabled) return;
+    // When intent mode is active, let the intent announcer speak instead.
+    if (_intentModeEnabled && _activeIntentQuery != null) return;
     if (!_soundEnabled) return;
     if (_voiceAssistant.isListening.value || _voiceAssistant.isSpeaking.value) return;
     final normalized = _normalizeText(text);
@@ -2069,6 +2148,7 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   Future<void> _maybeSpeakAlerts() async {
+    if (_conversationModeEnabled) return;
     if (!_soundEnabled) return;
     if (_voiceAssistant.isListening.value || _voiceAssistant.isSpeaking.value) return;
     final now = DateTime.now();
@@ -2134,19 +2214,18 @@ class _HomeScreenState extends State<HomeScreen>
     try {
       final inputImage = _inputImageFromCameraImage(image);
       if (inputImage == null) return;
-      final recognizers = _activeRecognizers();
-      if (recognizers.isEmpty) return;
-      final results = await Future.wait(
-        recognizers.map((recognizer) => recognizer.processImage(inputImage)),
-      );
+      final results = await Future.wait([
+        _latinTextRecognizer.processImage(inputImage),
+        _devanagariTextRecognizer.processImage(inputImage),
+        _tamilTextRecognizer.processImage(inputImage),
+      ]);
       final ocrResults = results;
-      final mergedRect = _mergeBoundingBoxes(results);
-      final mergedText = _mergeRecognizedText(
-        results,
-        focusRect: mergedRect,
-        imageSize: _lastFrameSize,
-      );
+      final mergedText = _mergeRecognizedText(results);
       _updateOcrPreview(mergedText);
+      if (mergedText.trim().isNotEmpty) {
+        _lastIntentOcrText = mergedText.trim();
+      }
+      final focusRect = _lastSignboardDetection?.rect ?? _signboardLandmark;
       if (_pendingConversationQuestion != null && !_conversationInFlight) {
         final question = _pendingConversationQuestion!;
         _pendingConversationQuestion = null;
@@ -2158,10 +2237,11 @@ class _HomeScreenState extends State<HomeScreen>
           !_conversationInFlight &&
           _pendingConversationQuestion == null) {
         final query = _activeIntentQuery!;
-        unawaited(_checkIntentMatch(query, mergedText, image, mergedRect));
+        debugPrint('[INTENT] Frame check: mode=enabled query="$query" ocr=${mergedText.length}chars');
+        unawaited(_checkIntentMatch(query, mergedText, image, focusRect));
       }
       if (!_signboardReady) {
-        _handleOcrResult(mergedText, image, mergedRect);
+        _handleOcrResult(mergedText, image);
       }
 
       final bool shouldRunRoad = _yoloReady &&
@@ -2262,7 +2342,7 @@ class _HomeScreenState extends State<HomeScreen>
             try {
               final detections = await _signboardDetector.detect(
                 rgbImage,
-                confThreshold: 0.3,
+                confThreshold: 0.25,
               );
               final scaledDetections = _scaleDetectionsToFrame(detections, rgbImage);
               if (mounted) {
@@ -2284,6 +2364,8 @@ class _HomeScreenState extends State<HomeScreen>
               }
               final text = _extractTextFromSignboards(ocrResults, rectSources);
               if (text.isNotEmpty) {
+                _lastIntentOcrText = text;
+                _lastSignboardIntentOcr = text; // Best source: signboard-cropped OCR
                 if (mounted) {
                   setState(() {
                     _latestOcrText = text;
@@ -2426,206 +2508,50 @@ class _HomeScreenState extends State<HomeScreen>
     return buffer.done().buffer.asUint8List();
   }
 
-  List<TextRecognizer> _activeRecognizers() {
-    switch (_selectedLanguage) {
-      case 'Hindi':
-        return [_latinTextRecognizer, _devanagariTextRecognizer];
-      case 'Tamil':
-        return [_latinTextRecognizer, _tamilTextRecognizer];
-      default:
-        return [_latinTextRecognizer];
-    }
-  }
-
-  String _mergeRecognizedText(
-    List<RecognizedText> results, {
-    Rect? focusRect,
-    Size? imageSize,
-  }) {
-    final lines = <_OcrLine>[];
-    for (final result in results) {
-      for (final block in result.blocks) {
-        if (block.lines.isEmpty) {
-          final text = block.text.trim();
-          if (text.isNotEmpty) {
-            lines.add(_OcrLine(text, block.boundingBox));
-          }
-          continue;
-        }
-        for (final line in block.lines) {
-          final text = line.text.trim();
-          if (text.isNotEmpty) {
-            lines.add(_OcrLine(text, line.boundingBox));
-          }
-        }
-      }
-    }
-
-    if (lines.isEmpty) return '';
-
-    final filtered = <_OcrLine>[];
+  String _mergeRecognizedText(List<RecognizedText> results) {
     final seen = <String>{};
-
-    final double? minHeight =
-        imageSize == null ? null : imageSize.height * 0.012;
-    final double? minWidth =
-        imageSize == null ? null : imageSize.width * 0.06;
-    final bool restrictToFocus = focusRect != null &&
-        imageSize != null &&
-        (focusRect.width * focusRect.height) /
-                (imageSize.width * imageSize.height) >=
-            0.02;
-
-    for (final line in lines) {
-      final text = line.text.trim();
-      if (text.isEmpty) continue;
-      if (_isNoiseLine(text)) continue;
-
-      if (minHeight != null && minWidth != null) {
-        if (line.rect.height < minHeight && line.rect.width < minWidth) {
-          continue;
-        }
-      }
-
-      if (restrictToFocus && focusRect != null) {
-        final overlap = _rectIntersectionRatio(line.rect, focusRect);
-        if (overlap < 0.35) {
-          continue;
-        }
-      }
-
-      final normalized = _normalizeText(text);
-      if (normalized.isEmpty) continue;
-      if (!seen.add(normalized)) continue;
-      filtered.add(line);
-    }
-
-    if (filtered.isEmpty) return '';
-
-    filtered.sort((a, b) {
-      final dy = a.rect.top - b.rect.top;
-      if (dy.abs() > (a.rect.height + b.rect.height) * 0.25) {
-        return dy.sign.toInt();
-      }
-      return (a.rect.left - b.rect.left).sign.toInt();
-    });
-
-    return filtered.map((line) => line.text).join('\n').trim();
-  }
-
-  Rect? _mergeBoundingBoxes(List<RecognizedText> results) {
-    Rect? merged;
+    final merged = <String>[];
     for (final result in results) {
-      for (final block in result.blocks) {
-        if (block.lines.isEmpty) {
-          merged = _mergeRect(merged, block.boundingBox);
-        } else {
-          for (final line in block.lines) {
-            merged = _mergeRect(merged, line.boundingBox);
-          }
-        }
+      final text = result.text.trim();
+      if (text.isEmpty) continue;
+      final normalized = _normalizeText(text);
+      if (seen.add(normalized)) {
+        merged.add(text);
       }
     }
-    return merged;
+    return merged.join('\n').trim();
   }
 
-  bool _isCentered(Rect rect, Size frameSize) {
-    if (frameSize.width <= 0 || frameSize.height <= 0) return false;
-    final dx = rect.center.dx / frameSize.width - 0.5;
-    final dy = rect.center.dy / frameSize.height - 0.5;
-    return dx.abs() <= _centerTolerance && dy.abs() <= _centerTolerance;
-  }
+  void _handleOcrResult(String text, CameraImage image) {
+    final cleaned = text.trim();
+    if (cleaned.isEmpty) return;
+    final normalized = _normalizeText(cleaned);
+    if (normalized.isEmpty) return;
 
-  String _directionGuidance(Rect rect, Size frameSize) {
-    final dx = rect.center.dx / frameSize.width - 0.5;
-    final dy = rect.center.dy / frameSize.height - 0.5;
-    if (dx.abs() >= dy.abs()) {
-      return dx < 0 ? 'Move left' : 'Move right';
-    }
-    return dy < 0 ? 'Move up' : 'Move down';
-  }
-
-  void _maybeProvideGuidance({
-    required Rect? focusRect,
-    required Size frameSize,
-    required bool hasText,
-    required double areaRatio,
-    required bool isCentered,
-    required bool isStable,
-  }) {
-    String message;
-    if (focusRect == null || !hasText) {
-      message = 'Point at a signboard.';
-    } else if (areaRatio < 0.02) {
-      message = 'Move closer to fill the signboard.';
-    } else if (!isCentered) {
-      message = _directionGuidance(focusRect, frameSize);
-    } else if (!isStable) {
-      message = 'Hold steady...';
-    } else {
-      message = 'Signboard detected.';
+    final now = DateTime.now();
+    if (normalized == _lastEmittedText && now.difference(_lastEmitTime) < _emitCooldown) {
+      return;
     }
 
+    if (_lastEmittedText.isNotEmpty) {
+      final similarity = _jaccardSimilarity(normalized, _lastEmittedText);
+      if (similarity >= 0.9 && now.difference(_lastEmitTime) < const Duration(seconds: 4)) {
+        return;
+      }
+    }
+
+    _lastEmittedText = normalized;
+    _lastEmitTime = now;
     if (mounted) {
       setState(() {
-        _currentGuidanceText = message;
+        _latestOcrText = cleaned;
+        _latestSmartText = '';
+        _latestSmartEmpty = false;
+        _latestGeminiError = null;
       });
     }
-
-    if (message != 'Hold steady...') {
-      _holdAnnounced = false;
-    }
-    if (message != 'Signboard detected.') {
-      _detectedAnnounced = false;
-    }
-
-    if (!_soundEnabled) return;
-    if (message == 'Signboard detected.') return;
-    if (_voiceAssistant.isListening.value || _voiceAssistant.isSpeaking.value) return;
-
-    final now = DateTime.now();
-    if (message == _lastGuidanceText && now.difference(_lastGuidanceTime) < _guidanceCooldown) {
-      return;
-    }
-    if (message == 'Hold steady...' && _holdAnnounced) {
-      return;
-    }
-
-    _lastGuidanceText = message;
-    _lastGuidanceTime = now;
-    if (message == 'Hold steady...') {
-      _holdAnnounced = true;
-    }
-    unawaited(_voiceAssistant.speak(message));
-  }
-
-  bool _updateFocusStability(Rect rect) {
-    final now = DateTime.now();
-    final lastRect = _lastFocusRect;
-    if (lastRect == null) {
-      _lastFocusRect = rect;
-      _focusStableSince = now;
-      _holdAnnounced = false;
-      return false;
-    }
-    final iou = _rectIoU(lastRect, rect);
-    _lastFocusRect = rect;
-    if (iou >= 0.65) {
-      if (_focusStableSince.millisecondsSinceEpoch == 0) {
-        _focusStableSince = now;
-      }
-    } else {
-      _focusStableSince = now;
-      _holdAnnounced = false;
-    }
-    return now.difference(_focusStableSince) >= _captureHoldDuration;
-  }
-
-  void _resetFocusStability() {
-    _lastFocusRect = null;
-    _focusStableSince = DateTime.fromMillisecondsSinceEpoch(0);
-    _holdAnnounced = false;
-    _detectedAnnounced = false;
+    debugPrint('OCR: $cleaned');
+    unawaited(_maybeSendToGemini(cleaned, image));
   }
 
   void _updateOcrPreview(String text) {
@@ -2638,427 +2564,10 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
-  Future<void> _toggleConversationMode() async {
-    final enable = !_conversationModeEnabled;
-    if (mounted) {
-      setState(() {
-        _conversationModeEnabled = enable;
-        if (enable) {
-          _intentModeEnabled = false;
-          _intentInFlight = false;
-          _pendingIntentQuery = null;
-          _activeIntentQuery = null;
-        }
-      });
-    }
-    if (!enable) {
-      _pendingConversationQuestion = null;
-      _conversationInFlight = false;
-      await _voiceAssistant.stop();
+  Future<void> _maybeSendToGemini(String text, CameraImage image) async {
+    if (_signboardReady) {
       return;
     }
-    if (_intentModeEnabled) {
-      _intentModeEnabled = false;
-      _activeIntentQuery = null;
-    }
-    await _requestConversationQuestion(initialPrompt: true);
-  }
-
-  Future<void> _requestConversationQuestion({required bool initialPrompt}) async {
-    if (!_cameraReady) {
-      if (_soundEnabled) {
-        await _voiceAssistant.speak('Camera is not ready yet.');
-      }
-      return;
-    }
-    final prompt = initialPrompt
-        ? 'Conversation mode on. Ask your question.'
-        : 'Ask another question.';
-    await _voiceAssistant.requestUserQuery(
-      prompt: _soundEnabled ? prompt : null,
-      onUserResponse: (text) async {
-        final trimmed = text.trim();
-        if (trimmed.isEmpty) return;
-        _pendingConversationQuestion = trimmed;
-      },
-    );
-  }
-
-  Future<void> _toggleIntentMode() async {
-    final enable = !_intentModeEnabled;
-    if (mounted) {
-      setState(() {
-        _intentModeEnabled = enable;
-        if (enable) {
-          _conversationModeEnabled = false;
-          _conversationInFlight = false;
-          _pendingConversationQuestion = null;
-        }
-      });
-    }
-    if (!enable) {
-      _pendingIntentQuery = null;
-      _activeIntentQuery = null;
-      _intentInFlight = false;
-      return;
-    }
-    await _requestIntentQuery(initialPrompt: true);
-  }
-
-  Future<void> _requestIntentQuery({required bool initialPrompt}) async {
-    if (!_cameraReady) {
-      if (_soundEnabled) {
-        await _voiceAssistant.speak('Camera is not ready yet.');
-      }
-      return;
-    }
-    final prompt = initialPrompt
-        ? 'Intent search on. What are you looking for?'
-        : 'What should I look for?';
-    await _voiceAssistant.requestUserQuery(
-      prompt: _soundEnabled ? prompt : null,
-      onUserResponse: (text) async {
-        final trimmed = text.trim();
-        if (trimmed.isEmpty) return;
-        _pendingIntentQuery = trimmed;
-        _activeIntentQuery = trimmed;
-      },
-    );
-  }
-
-  Rect? _mergeRect(Rect? merged, Rect rect) {
-    if (merged == null) return rect;
-    final left = merged.left < rect.left ? merged.left : rect.left;
-    final top = merged.top < rect.top ? merged.top : rect.top;
-    final right = merged.right > rect.right ? merged.right : rect.right;
-    final bottom = merged.bottom > rect.bottom ? merged.bottom : rect.bottom;
-    return Rect.fromLTRB(left, top, right, bottom);
-  }
-
-  double _rectIntersectionRatio(Rect a, Rect b) {
-    final left = a.left > b.left ? a.left : b.left;
-    final top = a.top > b.top ? a.top : b.top;
-    final right = a.right < b.right ? a.right : b.right;
-    final bottom = a.bottom < b.bottom ? a.bottom : b.bottom;
-    final overlapWidth = right - left;
-    final overlapHeight = bottom - top;
-    if (overlapWidth <= 0 || overlapHeight <= 0) return 0;
-    final intersection = overlapWidth * overlapHeight;
-    final area = a.width * a.height;
-    if (area <= 0) return 0;
-    return intersection / area;
-  }
-
-  Future<void> _announceAndCaptureFromFrame(
-    CameraImage image,
-    Rect focusRect,
-    String text,
-  ) async {
-    if (_isCapturing) return;
-    _isCapturing = true;
-    _lastCaptureTime = DateTime.now();
-
-    if (mounted) {
-      setState(() {
-        _currentGuidanceText = 'Signboard detected.';
-      });
-    }
-
-    try {
-      if (_soundEnabled &&
-          !_detectedAnnounced &&
-          !_voiceAssistant.isListening.value &&
-          !_voiceAssistant.isSpeaking.value) {
-        _detectedAnnounced = true;
-        await _voiceAssistant.speak('Signboard detected.');
-      }
-      await _captureFromFrame(image, focusRect, text);
-    } finally {
-      _isCapturing = false;
-    }
-  }
-
-  Future<void> _captureFromFrame(
-    CameraImage image,
-    Rect focusRect,
-    String text,
-  ) async {
-    final filteredText = _filterOcrText(text);
-    if (filteredText.isEmpty) {
-      if (mounted) {
-        setState(() {
-          _latestSmartText = '';
-          _latestSmartEmpty = true;
-          _latestGeminiError = null;
-        });
-      }
-      return;
-    }
-
-    final jpegBytes = _buildGeminiImage(image, cropRect: focusRect);
-    if (jpegBytes == null) {
-      if (mounted) {
-        setState(() {
-          _latestGeminiError = 'Unable to prepare camera image for Gemini.';
-          _latestSmartText = '';
-          _latestSmartEmpty = false;
-        });
-      }
-      return;
-    }
-
-    await _maybeSendToGemini(filteredText, jpegBytes);
-  }
-
-  Future<void> _answerConversation(
-    String question,
-    String ocrText,
-    CameraImage image,
-  ) async {
-    if (_conversationInFlight || _geminiInFlight) return;
-    _conversationInFlight = true;
-    _geminiInFlight = true;
-
-    if (mounted) {
-      setState(() {
-        _latestSmartText = 'Thinking...';
-        _latestSmartEmpty = false;
-        _latestGeminiError = null;
-      });
-    }
-
-    final cleaned = ocrText.trim();
-    if (cleaned.isEmpty) {
-      if (_soundEnabled) {
-        await _voiceAssistant.speak('I cannot see any text to answer that.');
-      }
-      _conversationInFlight = false;
-      _geminiInFlight = false;
-      await _maybeContinueConversation();
-      return;
-    }
-
-    final filteredText = _filterOcrTextForConversation(cleaned);
-    final textForGemini = filteredText.isNotEmpty ? filteredText : cleaned;
-    final jpegBytes = _buildGeminiImage(image);
-    if (jpegBytes == null) {
-      if (mounted) {
-        setState(() {
-          _latestGeminiError = 'Unable to prepare camera image for Gemini.';
-          _latestSmartText = '';
-          _latestSmartEmpty = false;
-        });
-      }
-      _conversationInFlight = false;
-      _geminiInFlight = false;
-      await _maybeContinueConversation();
-      return;
-    }
-
-    try {
-      final result = await _geminiService.analyzeConversation(
-        question: question,
-        ocrText: textForGemini,
-        jpegBytes: jpegBytes,
-        preferredLanguage: _selectedLanguage,
-      );
-      if (result == null) {
-        if (mounted) {
-          setState(() {
-            _latestGeminiError = 'No response from Gemini.';
-            _latestSmartText = '';
-            _latestSmartEmpty = false;
-          });
-        }
-        _conversationInFlight = false;
-        _geminiInFlight = false;
-        await _maybeContinueConversation();
-        return;
-      }
-      final speak = result.speak.trim();
-      if (mounted) {
-        setState(() {
-          _latestSmartText = speak;
-          _latestSmartEmpty = speak.isEmpty;
-          _latestGeminiError = null;
-        });
-      }
-      if (_soundEnabled && speak.isNotEmpty) {
-        await _speakGeminiText(speak);
-      } else if (_soundEnabled && speak.isEmpty) {
-        await _voiceAssistant.speak('I cannot see that answer right now.');
-      }
-    } catch (error) {
-      debugPrint('Conversation error: $error');
-      if (mounted) {
-        setState(() {
-          _latestGeminiError = 'Gemini error: ${error.toString()}';
-          _latestSmartText = '';
-          _latestSmartEmpty = false;
-        });
-      }
-    } finally {
-      _conversationInFlight = false;
-      _geminiInFlight = false;
-    }
-
-    await _maybeContinueConversation();
-  }
-
-  Future<void> _maybeContinueConversation() async {
-    if (!_conversationModeEnabled) return;
-    if (_voiceAssistant.isListening.value || _voiceAssistant.isSpeaking.value) return;
-    await Future<void>.delayed(_conversationRearmDelay);
-    if (!_conversationModeEnabled) return;
-    await _requestConversationQuestion(initialPrompt: false);
-  }
-
-  Future<void> _checkIntentMatch(
-    String intent,
-    String ocrText,
-    CameraImage image,
-    Rect? focusRect,
-  ) async {
-    if (_intentInFlight || _geminiInFlight) return;
-    final now = DateTime.now();
-    if (now.difference(_lastIntentCall) < _intentScanInterval) return;
-    _lastIntentCall = now;
-
-    final cleaned = ocrText.trim();
-    if (cleaned.isEmpty) return;
-
-    final filteredText = _filterOcrTextForConversation(cleaned);
-    final textForGemini = filteredText.isNotEmpty ? filteredText : cleaned;
-    if (_matchesIntentWithOcr(intent, textForGemini)) {
-      await _announceIntentMatch(_activeIntentQuery ?? intent, focusRect);
-      return;
-    }
-
-    final jpegBytes = _buildGeminiImage(image, cropRect: focusRect);
-    if (jpegBytes == null) return;
-
-    _intentInFlight = true;
-    _geminiInFlight = true;
-
-    try {
-      final result = await _geminiService.analyzeIntent(
-        intent: intent,
-        ocrText: textForGemini,
-        jpegBytes: jpegBytes,
-      );
-      if (result == null || !result.match) {
-        return;
-      }
-      await _announceIntentMatch(_activeIntentQuery ?? (result.category ?? intent), focusRect);
-    } catch (error) {
-      debugPrint('Intent error: $error');
-    } finally {
-      _intentInFlight = false;
-      _geminiInFlight = false;
-    }
-  }
-
-  Future<void> _announceIntentMatch(String intentName, Rect? focusRect) async {
-    final now = DateTime.now();
-    final direction = focusRect != null ? _directionForRect(focusRect) : 'ahead';
-    var canonical = _canonicalIntentName(intentName).toUpperCase();
-    if (!canonical.contains('STORE')) {
-      canonical = '$canonical STORE';
-    }
-    final directionPhrase =
-        direction == 'ahead' ? 'AHEAD' : 'ON YOUR ${direction.toUpperCase()}';
-    final message = '$canonical DETECTED $directionPhrase';
-    final key = '${_normalizeText(canonical)}:$direction';
-
-    if (key == _lastIntentKey && now.difference(_lastIntentSpokenTime) < _intentCooldown) {
-      return;
-    }
-
-    _lastIntentKey = key;
-    _lastIntentSpokenTime = now;
-    if (mounted) {
-      setState(() {
-        _latestSmartText = message;
-        _latestSmartEmpty = false;
-        _latestGeminiError = null;
-      });
-    }
-    if (_soundEnabled && !_voiceAssistant.isListening.value && !_voiceAssistant.isSpeaking.value) {
-      await _voiceAssistant.speak(message);
-    }
-  }
-
-  void _handleOcrResult(String text, CameraImage image, Rect? focusRect) {
-    if (_isCapturing) return;
-    final cleaned = text.trim();
-    final normalized = _normalizeText(cleaned);
-    final now = DateTime.now();
-    final frameSize = Size(image.width.toDouble(), image.height.toDouble());
-
-    if (focusRect == null || normalized.isEmpty) {
-      _resetFocusStability();
-      _maybeProvideGuidance(
-        focusRect: null,
-        frameSize: frameSize,
-        hasText: normalized.isNotEmpty,
-        areaRatio: 0,
-        isCentered: false,
-        isStable: false,
-      );
-      if (normalized.isEmpty) {
-        return;
-      }
-    }
-
-    final areaRatio = focusRect == null
-        ? 0.0
-        : (focusRect.width * focusRect.height) /
-            (frameSize.width * frameSize.height);
-    final isCentered = focusRect != null && _isCentered(focusRect, frameSize);
-    final isStable = focusRect != null && _updateFocusStability(focusRect);
-
-    _maybeProvideGuidance(
-      focusRect: focusRect,
-      frameSize: frameSize,
-      hasText: normalized.isNotEmpty,
-      areaRatio: areaRatio,
-      isCentered: isCentered,
-      isStable: isStable,
-    );
-
-    final shouldUpdateText =
-        !(normalized == _lastEmittedText && now.difference(_lastEmitTime) < _emitCooldown);
-    if (shouldUpdateText && normalized.isNotEmpty) {
-      _lastEmittedText = normalized;
-      _lastEmitTime = now;
-      if (mounted) {
-        setState(() {
-          _latestOcrText = cleaned;
-          _latestSmartText = '';
-          _latestSmartEmpty = false;
-          _latestGeminiError = null;
-        });
-      }
-      debugPrint('OCR: $cleaned');
-    }
-
-    if (focusRect != null &&
-        normalized.isNotEmpty &&
-        isCentered &&
-        isStable &&
-        areaRatio >= 0.03 &&
-        now.difference(_lastCaptureTime) >= _captureCooldown &&
-        !_conversationModeEnabled &&
-        !_conversationInFlight &&
-        _pendingConversationQuestion == null &&
-        !_intentModeEnabled &&
-        !_intentInFlight &&
-        _pendingIntentQuery == null) {
-      unawaited(_announceAndCaptureFromFrame(image, focusRect, cleaned));
-    }
-  }
-
-  Future<void> _maybeSendToGemini(String text, Uint8List jpegBytes) async {
     if (_geminiInFlight) return;
     if (!_geminiService.hasApiKey) {
       debugPrint('GEMINI_API_KEY not set. Skipping Gemini.');
@@ -3075,9 +2584,32 @@ class _HomeScreenState extends State<HomeScreen>
     final now = DateTime.now();
     if (now.difference(_lastGeminiCall) < _geminiCooldown) return;
 
-    final filteredNormalized = _normalizeText(text);
+    final filteredText = _filterOcrText(text);
+    if (filteredText.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _latestSmartText = '';
+          _latestSmartEmpty = true;
+          _latestGeminiError = null;
+        });
+      }
+      return;
+    }
+    final filteredNormalized = _normalizeText(filteredText);
     if (_lastGeminiText.isNotEmpty &&
         _jaccardSimilarity(filteredNormalized, _lastGeminiText) >= 0.9) {
+      return;
+    }
+
+    final jpegBytes = _buildGeminiImage(image);
+    if (jpegBytes == null) {
+      if (mounted) {
+        setState(() {
+          _latestGeminiError = 'Unable to prepare camera image for Gemini.';
+          _latestSmartText = '';
+          _latestSmartEmpty = false;
+        });
+      }
       return;
     }
 
@@ -3087,7 +2619,7 @@ class _HomeScreenState extends State<HomeScreen>
 
     try {
       final result = await _geminiService.analyze(
-        ocrText: text,
+        ocrText: filteredText,
         jpegBytes: jpegBytes,
       );
       if (result == null) {
@@ -3130,12 +2662,270 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
-  Uint8List? _buildGeminiImage(CameraImage image, {Rect? cropRect}) {
+  Future<void> _answerConversation(
+    String question,
+    String ocrText,
+    CameraImage image,
+  ) async {
+    if (_conversationInFlight || _geminiInFlight) return;
+    _conversationInFlight = true;
+    _geminiInFlight = true;
+
+    if (mounted) {
+      setState(() {
+        _latestSmartText = 'Thinking...';
+        _latestSmartEmpty = false;
+        _latestGeminiError = null;
+      });
+    }
+
+    final cleaned = ocrText.trim();
+    if (cleaned.isEmpty) {
+      if (_soundEnabled) {
+        await _voiceAssistant.speak('I cannot see any text to answer that.');
+      }
+      _conversationInFlight = false;
+      _geminiInFlight = false;
+      await _maybeContinueConversation();
+      return;
+    }
+
+    final localAnswer = _localAnswerFromOcr(question, cleaned);
+    if (localAnswer != null && localAnswer.trim().isNotEmpty) {
+      if (mounted) {
+        setState(() {
+          _latestSmartText = localAnswer;
+          _latestSmartEmpty = false;
+          _latestGeminiError = null;
+        });
+      }
+      if (_soundEnabled) {
+        if (_voiceAssistant.isListening.value) {
+          await _voiceAssistant.stop();
+        }
+        await _voiceAssistant.speak(localAnswer);
+      }
+      _conversationInFlight = false;
+      _geminiInFlight = false;
+      await _maybeContinueConversation();
+      return;
+    }
+
+    final filteredText = _filterOcrTextForConversation(cleaned);
+    final textForGemini = filteredText.isNotEmpty ? filteredText : cleaned;
+    final jpegBytes = _buildGeminiImage(image);
+    if (jpegBytes == null) {
+      if (mounted) {
+        setState(() {
+          _latestGeminiError = 'Unable to prepare camera image for Gemini.';
+          _latestSmartText = '';
+          _latestSmartEmpty = false;
+        });
+      }
+      _conversationInFlight = false;
+      _geminiInFlight = false;
+      await _maybeContinueConversation();
+      return;
+    }
+
+    try {
+      final result = await _geminiService.analyzeConversation(
+        question: question,
+        ocrText: textForGemini,
+        jpegBytes: jpegBytes,
+        preferredLanguage: _selectedLanguage,
+      );
+      if (result == null) {
+        final fallback = _localAnswerFromOcr(question, cleaned);
+        if (fallback != null && fallback.trim().isNotEmpty) {
+          if (mounted) {
+            setState(() {
+              _latestSmartText = fallback;
+              _latestSmartEmpty = false;
+              _latestGeminiError = null;
+            });
+          }
+          if (_soundEnabled) {
+            if (_voiceAssistant.isListening.value) {
+              await _voiceAssistant.stop();
+            }
+            await _voiceAssistant.speak(fallback);
+          }
+          _conversationInFlight = false;
+          _geminiInFlight = false;
+          await _maybeContinueConversation();
+          return;
+        }
+        if (mounted) {
+          setState(() {
+            _latestGeminiError = 'No response from Gemini.';
+            _latestSmartText = '';
+            _latestSmartEmpty = false;
+          });
+        }
+        _conversationInFlight = false;
+        _geminiInFlight = false;
+        await _maybeContinueConversation();
+        return;
+      }
+      final speak = result.speak.trim();
+      if (mounted) {
+        setState(() {
+          _latestSmartText = speak;
+          _latestSmartEmpty = speak.isEmpty;
+          _latestGeminiError = null;
+        });
+      }
+      if (_soundEnabled && speak.isNotEmpty) {
+        if (_voiceAssistant.isListening.value) {
+          await _voiceAssistant.stop();
+        }
+        await _voiceAssistant.speak(speak);
+      } else if (_soundEnabled && speak.isEmpty) {
+        await _voiceAssistant.speak('I cannot see that answer right now.');
+      }
+    } catch (error) {
+      debugPrint('Conversation error: $error');
+      final fallback = _localAnswerFromOcr(question, cleaned);
+      if (fallback != null && fallback.trim().isNotEmpty) {
+        if (mounted) {
+          setState(() {
+            _latestSmartText = fallback;
+            _latestSmartEmpty = false;
+            _latestGeminiError = null;
+          });
+        }
+        if (_soundEnabled) {
+          if (_voiceAssistant.isListening.value) {
+            await _voiceAssistant.stop();
+          }
+          await _voiceAssistant.speak(fallback);
+        }
+        _conversationInFlight = false;
+        _geminiInFlight = false;
+        await _maybeContinueConversation();
+        return;
+      }
+      if (mounted) {
+        setState(() {
+          _latestGeminiError = 'Gemini error: ${error.toString()}';
+          _latestSmartText = '';
+          _latestSmartEmpty = false;
+        });
+      }
+    } finally {
+      _conversationInFlight = false;
+      _geminiInFlight = false;
+    }
+
+    await _maybeContinueConversation();
+  }
+
+  Future<void> _maybeContinueConversation() async {
+    if (!_conversationModeEnabled) return;
+    if (_voiceAssistant.isListening.value || _voiceAssistant.isSpeaking.value) return;
+    await Future<void>.delayed(_conversationRearmDelay);
+    if (!_conversationModeEnabled) return;
+    await _requestConversationQuestion(initialPrompt: false);
+  }
+
+  Future<void> _checkIntentMatch(
+    String intent,
+    String ocrText,
+    CameraImage image,
+    Rect? focusRect,
+  ) async {
+    if (_intentInFlight) return;
+    final now = DateTime.now();
+
+    // --- Fast OCR-only path (no cooldown restriction, no API key needed) ---
+    // Use raw OCR text for intent matching — don't over-filter it.
+    // Prefer signboard-cropped OCR, fall back to full-frame OCR.
+    final signboardOcr = _lastSignboardIntentOcr.trim();
+    final fullOcr = ocrText.trim();
+    final bestOcr = signboardOcr.isNotEmpty ? signboardOcr : fullOcr;
+    debugPrint('[INTENT] Checking intent="$intent" against OCR (${bestOcr.length} chars): "${bestOcr.substring(0, bestOcr.length.clamp(0, 80))}"');
+    if (bestOcr.isNotEmpty) {
+      if (_matchesIntentWithOcr(intent, bestOcr)) {
+        debugPrint('[INTENT] OCR match found!');
+        await _announceIntentMatch(_activeIntentQuery ?? intent, focusRect);
+        return;
+      }
+    }
+
+    // --- Gemini path (rate-limited, requires API key) ---
+    if (_geminiInFlight) return;
+    if (now.difference(_lastIntentCall) < _intentScanInterval) return;
+    if (!_geminiService.hasApiKey) return;
+    _lastIntentCall = now;
+
+    final cleaned = bestOcr.isNotEmpty ? bestOcr : fullOcr;
+    if (cleaned.isEmpty) {
+      debugPrint('[INTENT] No OCR text available for Gemini check');
+      return;
+    }
+    debugPrint('[INTENT] Sending to Gemini: intent="$intent"');
+    final filteredText = _filterOcrTextForConversation(cleaned);
+    final textForGemini = filteredText.isNotEmpty ? filteredText : cleaned;
+
+    final jpegBytes = _buildGeminiImage(image);
+    if (jpegBytes == null) return;
+
+    _intentInFlight = true;
+    _geminiInFlight = true;
+
+    try {
+      final result = await _geminiService.analyzeIntent(
+        intent: intent,
+        ocrText: textForGemini,
+        jpegBytes: jpegBytes,
+      );
+      if (result == null || !result.match) {
+        return;
+      }
+      await _announceIntentMatch(_activeIntentQuery ?? (result.category ?? intent), focusRect);
+    } catch (error) {
+      debugPrint('Intent error: $error');
+    } finally {
+      _intentInFlight = false;
+      _geminiInFlight = false;
+    }
+  }
+
+  Future<void> _announceIntentMatch(String intentName, Rect? focusRect) async {
+    if (_conversationModeEnabled) return;
+    final now = DateTime.now();
+    final direction = focusRect != null ? _directionForRect(focusRect) : 'ahead';
+    final canonical = _canonicalIntentName(intentName);
+    final directionPhrase =
+        direction == 'ahead' ? 'ahead' : 'on your ${direction}';
+    final message = '$canonical detected $directionPhrase';
+    final key = '${_normalizeText(canonical)}:$direction';
+
+    if (key == _lastIntentKey && now.difference(_lastIntentSpokenTime) < _intentCooldown) {
+      return;
+    }
+
+    _lastIntentKey = key;
+    _lastIntentSpokenTime = now;
+    if (mounted) {
+      setState(() {
+        _latestSmartText = message;
+        _latestSmartEmpty = false;
+        _latestGeminiError = null;
+      });
+    }
+    if (_soundEnabled && !_voiceAssistant.isListening.value && !_voiceAssistant.isSpeaking.value) {
+      await _voiceAssistant.speak(message);
+    }
+  }
+
+  Uint8List? _buildGeminiImage(CameraImage image) {
     if (Platform.isIOS && image.format.group == ImageFormatGroup.bgra8888) {
-      return _buildJpegFromBgra(image, cropRect: cropRect);
+      return _buildJpegFromBgra(image);
     }
     if (Platform.isAndroid) {
-      return _buildJpegFromYuv420(image, cropRect: cropRect);
+      return _buildJpegFromYuv420(image);
     }
     return null;
   }
@@ -3216,7 +3006,7 @@ class _HomeScreenState extends State<HomeScreen>
     return rgbImage;
   }
 
-  Uint8List? _buildJpegFromBgra(CameraImage image, {Rect? cropRect}) {
+  Uint8List? _buildJpegFromBgra(CameraImage image) {
     if (image.planes.isEmpty) return null;
     final plane = image.planes.first;
     final bytes = plane.bytes;
@@ -3240,15 +3030,10 @@ class _HomeScreenState extends State<HomeScreen>
         rgbImage.setPixelRgba(ox, oy, r, g, b, a);
       }
     }
-    final img.Image outputImage = _cropImageIfNeeded(
-      rgbImage,
-      cropRect: cropRect,
-      originalSize: Size(width.toDouble(), height.toDouble()),
-    );
-    return Uint8List.fromList(img.encodeJpg(outputImage, quality: 85));
+    return Uint8List.fromList(img.encodeJpg(rgbImage, quality: 75));
   }
 
-  Uint8List? _buildJpegFromYuv420(CameraImage image, {Rect? cropRect}) {
+  Uint8List? _buildJpegFromYuv420(CameraImage image) {
     if (image.planes.length < 3) return null;
     final width = image.width;
     final height = image.height;
@@ -3285,43 +3070,11 @@ class _HomeScreenState extends State<HomeScreen>
       }
     }
 
-    final img.Image outputImage = _cropImageIfNeeded(
-      rgbImage,
-      cropRect: cropRect,
-      originalSize: Size(width.toDouble(), height.toDouble()),
-    );
-    return Uint8List.fromList(img.encodeJpg(outputImage, quality: 85));
-  }
-
-  img.Image _cropImageIfNeeded(
-    img.Image baseImage, {
-    required Rect? cropRect,
-    required Size originalSize,
-  }) {
-    if (cropRect == null) return baseImage;
-    if (cropRect.width <= 1 || cropRect.height <= 1) return baseImage;
-
-    final scaleX = baseImage.width / originalSize.width;
-    final scaleY = baseImage.height / originalSize.height;
-
-    int left = (cropRect.left * scaleX).round();
-    int top = (cropRect.top * scaleY).round();
-    int right = (cropRect.right * scaleX).round();
-    int bottom = (cropRect.bottom * scaleY).round();
-
-    left = left.clamp(0, baseImage.width - 1).toInt();
-    top = top.clamp(0, baseImage.height - 1).toInt();
-    right = right.clamp(left + 1, baseImage.width).toInt();
-    bottom = bottom.clamp(top + 1, baseImage.height).toInt();
-
-    final width = right - left;
-    final height = bottom - top;
-    if (width < 10 || height < 10) return baseImage;
-
-    return img.copyCrop(baseImage, x: left, y: top, width: width, height: height);
+    return Uint8List.fromList(img.encodeJpg(rgbImage, quality: 70));
   }
 
   Future<void> _speakGeminiText(String text) async {
+    if (_conversationModeEnabled) return;
     final normalized = _normalizeText(text);
     final now = DateTime.now();
     if (normalized == _lastSpokenText &&
@@ -3350,6 +3103,105 @@ class _HomeScreenState extends State<HomeScreen>
     return filtered.join('\n');
   }
 
+  String? _localAnswerFromOcr(String question, String ocrText) {
+    final q = question.toLowerCase();
+    final items = _parseMenuItems(ocrText);
+    if (items.isEmpty) return null;
+
+    if (q.contains('cheapest') || q.contains('lowest') || q.contains('least expensive')) {
+      final cheapest = items.reduce((a, b) => a.price <= b.price ? a : b);
+      return 'The cheapest item is ${cheapest.name} at ${_formatPrice(cheapest)}.';
+    }
+    if (q.contains('most expensive') || q.contains('costliest') || q.contains('highest')) {
+      final costliest = items.reduce((a, b) => a.price >= b.price ? a : b);
+      return 'The most expensive item is ${costliest.name} at ${_formatPrice(costliest)}.';
+    }
+
+    if (q.contains('price') || q.contains('cost') || q.contains('how much')) {
+      final qTokens = q.split(RegExp(r'[^a-z0-9]+')).where((t) => t.length > 2).toSet();
+      _MenuItem? best;
+      var bestScore = 0;
+      for (final item in items) {
+        final nameTokens =
+            item.name.toLowerCase().split(RegExp(r'[^a-z0-9]+')).where((t) => t.length > 2);
+        var score = 0;
+        for (final token in nameTokens) {
+          if (qTokens.contains(token)) score++;
+        }
+        if (score > bestScore) {
+          bestScore = score;
+          best = item;
+        }
+      }
+      if (best != null && bestScore > 0) {
+        return '${best.name} costs ${_formatPrice(best)}.';
+      }
+    }
+
+    return null;
+  }
+
+  String _formatPrice(_MenuItem item) {
+    final hasDecimals = (item.price - item.price.truncateToDouble()).abs() > 0.001;
+    final value = hasDecimals ? item.price.toStringAsFixed(2) : item.price.toStringAsFixed(0);
+    if (item.currency == r'$') {
+      return '\$$value';
+    }
+    if (item.currency == '₹') {
+      return '$value rupees';
+    }
+    return value;
+  }
+
+  List<_MenuItem> _parseMenuItems(String ocrText) {
+    final lines = ocrText.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).toList();
+    final items = <_MenuItem>[];
+    final priceRegex = RegExp(r'((?:₹|rs\\.?|inr|\\$)\\s*)?(\\d+(?:[.,]\\d{2})?)', caseSensitive: false);
+    final defaultCurrency = _detectCurrency(ocrText);
+    String? pendingName;
+    for (final line in lines) {
+      final matches = priceRegex.allMatches(line).toList();
+      final hasLetters = RegExp(r'[A-Za-z]').hasMatch(line);
+      if (matches.isNotEmpty) {
+        final match = matches.last;
+        final currencyToken = (match.group(1) ?? '').trim();
+        final rawNumber = (match.group(2) ?? '').replaceAll(',', '.');
+        final price = double.tryParse(rawNumber);
+        if (price == null) continue;
+        var name = line.replaceAll(priceRegex, ' ').replaceAll(RegExp(r'\\s+'), ' ').trim();
+        if (name.isEmpty && pendingName != null) {
+          name = pendingName;
+        }
+        if (name.isNotEmpty) {
+          final currency = _normalizeCurrency(currencyToken, defaultCurrency);
+          items.add(_MenuItem(name, price, currency));
+          pendingName = null;
+        }
+      } else if (hasLetters) {
+        pendingName = line;
+      }
+    }
+    return items;
+  }
+
+  String _detectCurrency(String text) {
+    final lower = text.toLowerCase();
+    if (lower.contains(r'$')) return r'$';
+    if (lower.contains('₹') || lower.contains('rs') || lower.contains('inr')) {
+      return '₹';
+    }
+    return '';
+  }
+
+  String _normalizeCurrency(String token, String fallback) {
+    final lower = token.toLowerCase();
+    if (lower.contains(r'$')) return r'$';
+    if (lower.contains('₹') || lower.contains('rs') || lower.contains('inr')) {
+      return '₹';
+    }
+    return fallback;
+  }
+
   String _filterOcrTextForConversation(String text) {
     final lines = text.split('\n');
     final filtered = <String>[];
@@ -3365,8 +3217,8 @@ class _HomeScreenState extends State<HomeScreen>
 
       final hasLetters = RegExp(r'[a-zA-Z]').hasMatch(trimmed);
       final hasDigits = RegExp(r'\d').hasMatch(trimmed);
-      final hasCurrency = RegExp(r'[₹$€£]|rs\.?|inr', caseSensitive: false)
-          .hasMatch(trimmed);
+      final hasCurrency =
+          RegExp(r'(rs\.?|inr|\$)', caseSensitive: false).hasMatch(trimmed);
 
       if (hasLetters || hasDigits || hasCurrency) {
         filtered.add(trimmed);
@@ -3377,28 +3229,41 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   List<String> _intentKeywordsForQuery(String intent) {
-    final normalized = _normalizeText(intent);
+    final normalizedIntent = _normalizeText(intent);
+    final intentTokens = normalizedIntent
+        .split(' ')
+        .map((t) => t.trim())
+        .where((t) => t.length >= 2)
+        .toSet();
     final keywords = <String>{};
+    // Add the raw intent tokens themselves
+    keywords.addAll(intentTokens);
+    // Expand using synonym hints: if any hint keyword matches an intent token,
+    // add the full synonym set for that category.
     for (final entry in _intentKeywordHints.entries) {
-      if (normalized.contains(entry.key)) {
-        keywords.addAll(entry.value.map(_normalizeText));
+      final synonyms = entry.value.map(_normalizeText).toList();
+      // Check if user said any word from this category's synonym list
+      final hasMatch = intentTokens.any((token) =>
+          synonyms.any((syn) => syn.contains(token) || token.contains(syn)));
+      if (hasMatch) {
+        keywords.addAll(synonyms);
+        // Also add the category key itself
+        keywords.add(_normalizeText(entry.key));
       }
     }
-    keywords.addAll(
-      normalized
-          .split(' ')
-          .map((token) => token.trim())
-          .where((token) => token.length >= 2),
-    );
     return keywords.toList();
   }
 
   bool _matchesIntentWithOcr(String intent, String ocrText) {
     final normalizedText = _normalizeText(ocrText);
     if (normalizedText.isEmpty) return false;
-    for (final keyword in _intentKeywordsForQuery(intent)) {
+    final keywords = _intentKeywordsForQuery(intent);
+    debugPrint('[INTENT] kw: ' + keywords.join(','));
+    debugPrint('[INTENT] ocr: ' + normalizedText.substring(0, normalizedText.length.clamp(0, 100)));
+    for (final keyword in keywords) {
       if (keyword.isEmpty) continue;
       if (normalizedText.contains(keyword)) {
+        debugPrint('[INTENT] hit: ' + keyword);
         return true;
       }
     }
@@ -3408,6 +3273,19 @@ class _HomeScreenState extends State<HomeScreen>
   String _canonicalIntentName(String intent) {
     final normalized = _normalizeText(intent);
     if (normalized.isEmpty) return 'Store';
+    // Check if any recognized category key appears in the normalized intent.
+    for (final entry in _intentCategoryNames.entries) {
+      if (normalized.contains(entry.key)) {
+        return entry.value;
+      }
+    }
+    // Check synonym lists to map a synonym back to its category name.
+    for (final entry in _intentKeywordHints.entries) {
+      final synonyms = entry.value.map(_normalizeText).toList();
+      if (synonyms.any((syn) => normalized.contains(syn))) {
+        return _intentCategoryNames[entry.key] ?? intent.trim();
+      }
+    }
     return intent.trim();
   }
 
@@ -3568,4 +3446,3 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 }
-

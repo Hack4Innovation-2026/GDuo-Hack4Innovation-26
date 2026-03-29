@@ -13,7 +13,7 @@ const String GEMINI_API_KEY = 'AIzaSyA_HhasPrATdqwWTcpfOwqbzEkMcZAdeAo';
 
 /// Gemini REST endpoint
 const String GEMINI_ENDPOINT =
-    'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
 
 /// Path to the YOLOv8 ONNX model asset (exported from best.pt)
 const String YOLO_MODEL_ASSET = 'assets/models/best.onnx';

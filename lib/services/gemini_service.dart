@@ -16,7 +16,7 @@ class GeminiService {
         _model = model ??
             const String.fromEnvironment(
               'GEMINI_MODEL',
-              defaultValue: 'gemini-1.5-flash',
+              defaultValue: 'gemini-2.5-flash',
             );
 
   final String _apiKey;
@@ -38,9 +38,12 @@ Return ONLY strict JSON: {"speak":"...","action":null} or {"speak":"...","action
 ''';
 
   static const String _conversationInstruction = '''
-You are DrishtiAI. Answer the user's question using the OCR text and the image.
-Be concise and directly answer the question in one sentence (<= 25 words).
-If the answer is not visible or cannot be inferred, say you cannot see it.
+You are DrishtiAI. Your job is to answer the user's spoken question using OCR text + image context.
+Always prioritize the question. Do not answer something unrelated or partial.
+First identify the relevant info in the OCR (item names, prices, directions, availability). Then answer the question directly.
+Reply with ONE short sentence (<= 25 words) that is the final answer (no filler, no restating the OCR).
+If the answer is not visible or cannot be inferred, say: "I cannot see that."
+If multiple options match, give the best single answer; if truly ambiguous, say you cannot see it.
 Respond in the preferred language if provided; otherwise match the dominant OCR script.
 Ignore ads, slogans, URLs, app/browser UI, search results, watermarks, legal disclaimers, repeated lines, and noise.
 Return ONLY strict JSON: {"speak":"...","action":null} or {"speak":"...","action":{"type":"call|maps","value":"..."}}.
@@ -62,10 +65,6 @@ If unclear, return {"match":false}.
       // Avoid spamming logs on every frame.
       return null;
     }
-
-    final uri = Uri.parse(
-      'https://generativelanguage.googleapis.com/v1beta/models/$_model:generateContent?key=$_apiKey',
-    );
 
     final languageHint = (preferredLanguage == null || preferredLanguage!.trim().isEmpty)
         ? 'Auto'
@@ -111,13 +110,7 @@ If nothing useful exists, return {"speak":"","action":null}.
       },
     });
 
-    final response = await http.post(
-      uri,
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: body,
-    );
+    final response = await _postWithFallback(body);
 
     if (response.statusCode != 200) {
       throw Exception('Gemini HTTP ${response.statusCode}');
@@ -154,10 +147,6 @@ If nothing useful exists, return {"speak":"","action":null}.
     if (_apiKey.isEmpty) {
       return null;
     }
-
-    final uri = Uri.parse(
-      'https://generativelanguage.googleapis.com/v1beta/models/$_model:generateContent?key=$_apiKey',
-    );
 
     final languageHint = (preferredLanguage == null || preferredLanguage.trim().isEmpty)
         ? 'Auto'
@@ -206,13 +195,7 @@ If nothing useful exists, return {"speak":"","action":null}.
       },
     });
 
-    final response = await http.post(
-      uri,
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: body,
-    );
+    final response = await _postWithFallback(body);
 
     if (response.statusCode != 200) {
       throw Exception('Gemini HTTP ${response.statusCode}');
@@ -248,10 +231,6 @@ If nothing useful exists, return {"speak":"","action":null}.
     if (_apiKey.isEmpty) {
       return null;
     }
-
-    final uri = Uri.parse(
-      'https://generativelanguage.googleapis.com/v1beta/models/$_model:generateContent?key=$_apiKey',
-    );
 
     final prompt = '''
 USER INTENT:
@@ -292,13 +271,7 @@ or
       },
     });
 
-    final response = await http.post(
-      uri,
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: body,
-    );
+    final response = await _postWithFallback(body);
 
     if (response.statusCode != 200) {
       throw Exception('Gemini HTTP ${response.statusCode}');
@@ -324,6 +297,45 @@ or
       throw Exception('Unable to parse Gemini intent JSON response.');
     }
     return parsed;
+  }
+
+  Future<http.Response> _postWithFallback(Object body) async {
+    final candidates = <String>[
+      _model,
+      'gemini-2.5-flash',
+      'gemini-2.5-flash-latest',
+      'gemini-2.5-pro',
+      'gemini-2.5-pro-latest',
+      'gemini-2.5-flash-lite',
+    ];
+    http.Response? lastResponse;
+    final seen = <String>{};
+    for (final model in candidates) {
+      final trimmed = model.trim();
+      if (trimmed.isEmpty) continue;
+      if (!seen.add(trimmed)) continue;
+      final uri = Uri.parse(
+        'https://generativelanguage.googleapis.com/v1beta/models/$trimmed:generateContent?key=$_apiKey',
+      );
+      final response = await http.post(
+        uri,
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: body,
+      );
+      lastResponse = response;
+      if (response.statusCode == 200) {
+        return response;
+      }
+      if (response.statusCode != 404) {
+        return response;
+      }
+    }
+    if (lastResponse != null) {
+      return lastResponse;
+    }
+    throw Exception('Gemini HTTP 404');
   }
 
   GeminiResult? _parseJson(String rawText) {

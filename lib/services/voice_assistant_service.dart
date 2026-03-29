@@ -180,7 +180,9 @@ class VoiceAssistantService {
       return;
     }
     _pendingUserResponse = null;
-    unawaited(_startListening(pendingResponse));
+    unawaited(Future<void>.delayed(const Duration(milliseconds: 300), () {
+      return _startListening(pendingResponse);
+    }));
   }
 
   Future<void> _startListening(Future<void> Function(String text) onUserResponse) async {
@@ -213,6 +215,7 @@ class VoiceAssistantService {
     _listenCompleter = Completer<void>();
 
     try {
+      await _speech.cancel();
       await _speech.listen(
         onResult: (result) {
           liveTranscript.value = result.recognizedWords;
@@ -220,13 +223,13 @@ class VoiceAssistantService {
             _finalResult = result.recognizedWords;
           }
         },
-        listenMode: stt.ListenMode.confirmation,
+        listenMode: stt.ListenMode.dictation,
         localeId: _localeId,
         partialResults: true,
         onDevice: false,
         cancelOnError: true,
-        listenFor: const Duration(seconds: 8),
-        pauseFor: const Duration(seconds: 2),
+        listenFor: const Duration(seconds: 12),
+        pauseFor: const Duration(seconds: 3),
       );
 
       await _listenCompleter?.future;
@@ -238,7 +241,8 @@ class VoiceAssistantService {
       isListening.value = false;
     }
 
-    final finalText = _finalResult.trim();
+    final fallbackText = liveTranscript.value.trim();
+    final finalText = _finalResult.trim().isNotEmpty ? _finalResult.trim() : fallbackText;
     if (finalText.isEmpty) {
       lastError.value = 'No speech detected.';
       _isBusy = false;
