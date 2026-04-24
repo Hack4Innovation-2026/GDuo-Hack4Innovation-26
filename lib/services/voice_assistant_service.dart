@@ -86,11 +86,27 @@ class VoiceAssistantService {
     }
     lastError.value = null;
     await _tts.stop();
-    final result = await _tts.speak(text);
-    if ((result is int && result == 0) || (result is bool && result == false)) {
+    final ok = await _trySpeak(text);
+    if (!ok) {
       lastError.value = 'Unable to start speech synthesis.';
       isSpeaking.value = false;
     }
+  }
+
+  Future<bool> _trySpeak(String text) async {
+    final result = await _tts.speak(text);
+    if ((result is int && result == 0) || (result is bool && result == false)) {
+      // Retry with a safe fallback language.
+      try {
+        await _tts.setLanguage('en-US');
+        await _applyVoiceForLocale('en-US');
+      } catch (_) {}
+      final retry = await _tts.speak(text);
+      if ((retry is int && retry == 0) || (retry is bool && retry == false)) {
+        return false;
+      }
+    }
+    return true;
   }
 
   Future<void> onSignboardDetected(
@@ -180,7 +196,7 @@ class VoiceAssistantService {
       return;
     }
     _pendingUserResponse = null;
-    unawaited(Future<void>.delayed(const Duration(milliseconds: 300), () {
+    unawaited(Future<void>.delayed(const Duration(milliseconds: 600), () {
       return _startListening(pendingResponse);
     }));
   }
@@ -227,9 +243,9 @@ class VoiceAssistantService {
         localeId: _localeId,
         partialResults: true,
         onDevice: false,
-        cancelOnError: true,
-        listenFor: const Duration(seconds: 12),
-        pauseFor: const Duration(seconds: 3),
+        cancelOnError: false,
+        listenFor: const Duration(seconds: 22),
+        pauseFor: const Duration(seconds: 5),
       );
 
       await _listenCompleter?.future;

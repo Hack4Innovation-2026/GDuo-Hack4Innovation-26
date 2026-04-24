@@ -62,3 +62,8 @@ runs/
 
 # ONNX models
 *.onnx
+
+# Environment secrets
+.env
+.env.*
+!.env.example

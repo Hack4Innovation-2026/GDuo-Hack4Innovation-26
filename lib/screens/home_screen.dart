@@ -10,6 +10,8 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:image/image.dart' as img;
 import 'package:permission_handler/permission_handler.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../config/config.dart';
 import '../services/voice_assistant_service.dart';
@@ -115,7 +117,14 @@ class _HomeScreenState extends State<HomeScreen>
   DateTime _lastIntentSpokenTime = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastIntentKey = '';
   String _lastIntentOcrText = '';
-  String _lastSignboardIntentOcr = ''; // Only set from signboard-cropped OCR
+  String? _pendingCallNumber;
+  bool _callPromptInFlight = false;
+  DateTime _lastCallPromptAt = DateTime.fromMillisecondsSinceEpoch(0);
+  String _emergencyContactName = '';
+  String _emergencyContactNumber = '';
+
+  static const String _prefEmergencyNameKey = 'emergency_contact_name';
+  static const String _prefEmergencyNumberKey = 'emergency_contact_number';
   Size? _lastFrameSize;
   DateTime _lastAlertSpokenAt = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastAlertKey = '';
@@ -127,15 +136,16 @@ class _HomeScreenState extends State<HomeScreen>
   int _signboardLandmarkStreak = 0;
   YoloDetection? _lastSignboardDetection;
 
-  static const Duration _analysisInterval = Duration(milliseconds: 500);
+  static const Duration _analysisInterval = Duration(milliseconds: 400);
   static const Duration _emitCooldown = Duration(milliseconds: 1500);
   static const Duration _speechCooldown = Duration(seconds: 4);
   static const Duration _alertSpeakCooldown = Duration(seconds: 4);
   static const Duration _signboardPriorityWindow = Duration(seconds: 5);
   static const Duration _geminiCooldown = Duration(seconds: 6);
-  static const Duration _conversationRearmDelay = Duration(milliseconds: 600);
-  static const Duration _intentCooldown = Duration(seconds: 6);
-  static const Duration _intentScanInterval = Duration(seconds: 2);
+  static const Duration _conversationRearmDelay = Duration(milliseconds: 300);
+  static const Duration _intentCooldown = Duration(seconds: 4);
+  static const Duration _intentScanInterval = Duration(milliseconds: 900);
+  static const Duration _callPromptCooldown = Duration(seconds: 20);
   static const Map<String, String> _intentCategoryNames = {
     'medical': 'Medical store',
     'hospital': 'Hospital',
@@ -569,6 +579,7 @@ class _HomeScreenState extends State<HomeScreen>
       }
     };
     _voiceAssistant.isListening.addListener(_micListeningListener);
+    unawaited(_loadEmergencyContact());
   }
 
   @override
@@ -609,6 +620,7 @@ class _HomeScreenState extends State<HomeScreen>
             _buildMainContent(),
             _buildDetectionOverlay(),
             _buildTopRightSettings(),
+            _buildTopRightEmergencyCall(),
             _buildBottomRightIntent(),
             _buildBottomRightConversation(),
             _buildBottomRightSOS(),
@@ -882,12 +894,31 @@ class _HomeScreenState extends State<HomeScreen>
   Widget _buildTopRightSettings() {
     return Positioned(
       top: 16,
-      right: 16,
+      right: 72,
       child: IconButton(
         icon: const Icon(Icons.settings, size: 32),
         color: _currentState == HomeState.scanning ? Colors.white : const Color(0xFF1A1A1A),
         tooltip: 'Settings',
         onPressed: _showSettingsBottomSheet,
+        constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+      ),
+    );
+  }
+
+  Widget _buildTopRightEmergencyCall() {
+    if (_emergencyContactNumber.trim().isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return Positioned(
+      top: 16,
+      right: 16,
+      child: IconButton(
+        icon: const Icon(Icons.call_rounded, size: 30),
+        color: const Color(0xFFCC0000),
+        tooltip: 'Emergency Call',
+        onPressed: () {
+          unawaited(_launchCall(_emergencyContactNumber));
+        },
         constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
       ),
     );
@@ -1166,8 +1197,10 @@ class _HomeScreenState extends State<HomeScreen>
         _lastIntentCall = DateTime.fromMillisecondsSinceEpoch(0);
         _lastIntentSpokenTime = DateTime.fromMillisecondsSinceEpoch(0);
         _lastIntentKey = '';
+        _pendingCallNumber = null;
+        _callPromptInFlight = false;
+        _lastCallPromptAt = DateTime.fromMillisecondsSinceEpoch(0);
         _lastIntentOcrText = '';
-        _lastSignboardIntentOcr = '';
       });
       WidgetsBinding.instance.addPostFrameCallback((_) {
         unawaited(_disposeController(controller));
@@ -1348,6 +1381,43 @@ class _HomeScreenState extends State<HomeScreen>
               color: Colors.white,
             ),
           ),
+          if (_pendingCallNumber != null) ...[
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Call ${_pendingCallNumber!}?',
+                    style: GoogleFonts.outfit(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                TextButton(
+                  onPressed: () {
+                    setState(() {
+                      _pendingCallNumber = null;
+                    });
+                  },
+                  child: const Text('No'),
+                ),
+                ElevatedButton(
+                  onPressed: () {
+                    final number = _pendingCallNumber;
+                    if (number == null) return;
+                    setState(() {
+                      _pendingCallNumber = null;
+                    });
+                    unawaited(_launchCall(number));
+                  },
+                  child: const Text('Call'),
+                ),
+              ],
+            ),
+          ],
         ],
       ),
     );
@@ -2229,7 +2299,10 @@ class _HomeScreenState extends State<HomeScreen>
       if (_pendingConversationQuestion != null && !_conversationInFlight) {
         final question = _pendingConversationQuestion!;
         _pendingConversationQuestion = null;
-        unawaited(_answerConversation(question, mergedText, image));
+        final conversationText = mergedText.trim().isNotEmpty
+            ? mergedText
+            : _lastIntentOcrText;
+        unawaited(_answerConversation(question, conversationText, image));
       }
       if (_intentModeEnabled &&
           _activeIntentQuery != null &&
@@ -2365,7 +2438,6 @@ class _HomeScreenState extends State<HomeScreen>
               final text = _extractTextFromSignboards(ocrResults, rectSources);
               if (text.isNotEmpty) {
                 _lastIntentOcrText = text;
-                _lastSignboardIntentOcr = text; // Best source: signboard-cropped OCR
                 if (mounted) {
                   setState(() {
                     _latestOcrText = text;
@@ -2374,6 +2446,7 @@ class _HomeScreenState extends State<HomeScreen>
                     _latestGeminiError = null;
                   });
                 }
+                _maybePromptCallFromText(text);
                 final landmarkRect = _signboardLandmark;
                 if (speakTarget == null && landmarkRect != null) {
                   speakTarget = _fallbackSignboardDetection(landmarkRect);
@@ -2551,6 +2624,7 @@ class _HomeScreenState extends State<HomeScreen>
       });
     }
     debugPrint('OCR: $cleaned');
+    _maybePromptCallFromText(cleaned);
     unawaited(_maybeSendToGemini(cleaned, image));
   }
 
@@ -2568,13 +2642,16 @@ class _HomeScreenState extends State<HomeScreen>
     if (_signboardReady) {
       return;
     }
+    if (_conversationModeEnabled || _intentModeEnabled) {
+      return;
+    }
     if (_geminiInFlight) return;
     if (!_geminiService.hasApiKey) {
       debugPrint('GEMINI_API_KEY not set. Skipping Gemini.');
       if (mounted) {
         setState(() {
           _latestGeminiError =
-              'Gemini API key missing. Run with --dart-define=GEMINI_API_KEY=YOUR_KEY';
+              'Gemini API key missing. Add GEMINI_API_KEY in .env or run with --dart-define=GEMINI_API_KEY=YOUR_KEY';
           _latestSmartText = '';
           _latestSmartEmpty = false;
         });
@@ -2667,9 +2744,8 @@ class _HomeScreenState extends State<HomeScreen>
     String ocrText,
     CameraImage image,
   ) async {
-    if (_conversationInFlight || _geminiInFlight) return;
+    if (_conversationInFlight) return;
     _conversationInFlight = true;
-    _geminiInFlight = true;
 
     if (mounted) {
       setState(() {
@@ -2685,7 +2761,6 @@ class _HomeScreenState extends State<HomeScreen>
         await _voiceAssistant.speak('I cannot see any text to answer that.');
       }
       _conversationInFlight = false;
-      _geminiInFlight = false;
       await _maybeContinueConversation();
       return;
     }
@@ -2706,7 +2781,6 @@ class _HomeScreenState extends State<HomeScreen>
         await _voiceAssistant.speak(localAnswer);
       }
       _conversationInFlight = false;
-      _geminiInFlight = false;
       await _maybeContinueConversation();
       return;
     }
@@ -2723,7 +2797,6 @@ class _HomeScreenState extends State<HomeScreen>
         });
       }
       _conversationInFlight = false;
-      _geminiInFlight = false;
       await _maybeContinueConversation();
       return;
     }
@@ -2752,7 +2825,6 @@ class _HomeScreenState extends State<HomeScreen>
             await _voiceAssistant.speak(fallback);
           }
           _conversationInFlight = false;
-          _geminiInFlight = false;
           await _maybeContinueConversation();
           return;
         }
@@ -2764,7 +2836,6 @@ class _HomeScreenState extends State<HomeScreen>
           });
         }
         _conversationInFlight = false;
-        _geminiInFlight = false;
         await _maybeContinueConversation();
         return;
       }
@@ -2802,7 +2873,6 @@ class _HomeScreenState extends State<HomeScreen>
           await _voiceAssistant.speak(fallback);
         }
         _conversationInFlight = false;
-        _geminiInFlight = false;
         await _maybeContinueConversation();
         return;
       }
@@ -2815,7 +2885,6 @@ class _HomeScreenState extends State<HomeScreen>
       }
     } finally {
       _conversationInFlight = false;
-      _geminiInFlight = false;
     }
 
     await _maybeContinueConversation();
@@ -2840,21 +2909,17 @@ class _HomeScreenState extends State<HomeScreen>
 
     // --- Fast OCR-only path (no cooldown restriction, no API key needed) ---
     // Use raw OCR text for intent matching — don't over-filter it.
-    // Prefer signboard-cropped OCR, fall back to full-frame OCR.
-    final signboardOcr = _lastSignboardIntentOcr.trim();
+    // Prefer the most recent OCR text captured (signboard-cropped or full frame).
     final fullOcr = ocrText.trim();
-    final bestOcr = signboardOcr.isNotEmpty ? signboardOcr : fullOcr;
-    debugPrint('[INTENT] Checking intent="$intent" against OCR (${bestOcr.length} chars): "${bestOcr.substring(0, bestOcr.length.clamp(0, 80))}"');
+    final bestOcr = _lastIntentOcrText.trim().isNotEmpty ? _lastIntentOcrText.trim() : fullOcr;
     if (bestOcr.isNotEmpty) {
       if (_matchesIntentWithOcr(intent, bestOcr)) {
-        debugPrint('[INTENT] OCR match found!');
         await _announceIntentMatch(_activeIntentQuery ?? intent, focusRect);
         return;
       }
     }
 
     // --- Gemini path (rate-limited, requires API key) ---
-    if (_geminiInFlight) return;
     if (now.difference(_lastIntentCall) < _intentScanInterval) return;
     if (!_geminiService.hasApiKey) return;
     _lastIntentCall = now;
@@ -2872,7 +2937,6 @@ class _HomeScreenState extends State<HomeScreen>
     if (jpegBytes == null) return;
 
     _intentInFlight = true;
-    _geminiInFlight = true;
 
     try {
       final result = await _geminiService.analyzeIntent(
@@ -2888,7 +2952,6 @@ class _HomeScreenState extends State<HomeScreen>
       debugPrint('Intent error: $error');
     } finally {
       _intentInFlight = false;
-      _geminiInFlight = false;
     }
   }
 
@@ -2918,6 +2981,159 @@ class _HomeScreenState extends State<HomeScreen>
     if (_soundEnabled && !_voiceAssistant.isListening.value && !_voiceAssistant.isSpeaking.value) {
       await _voiceAssistant.speak(message);
     }
+  }
+
+  Future<void> _maybePromptCallFromText(String text) async {
+    if (_conversationModeEnabled) return;
+    if (_callPromptInFlight) return;
+    final now = DateTime.now();
+    if (now.difference(_lastCallPromptAt) < _callPromptCooldown) return;
+    final number = _bestPhoneCandidate(text);
+    if (number == null || number.isEmpty) return;
+    if (_pendingCallNumber == number &&
+        now.difference(_lastCallPromptAt) < const Duration(seconds: 10)) {
+      return;
+    }
+    _pendingCallNumber = number;
+    _lastCallPromptAt = now;
+    if (!_soundEnabled) return;
+    if (_voiceAssistant.isListening.value || _voiceAssistant.isSpeaking.value) return;
+    _callPromptInFlight = true;
+    unawaited(Future<void>.delayed(const Duration(seconds: 12), () {
+      _callPromptInFlight = false;
+    }));
+    await _voiceAssistant.requestUserQuery(
+      prompt: 'Phone number detected. Do you want to call $number?',
+      onUserResponse: (response) async {
+        final normalized = response.trim();
+        if (_isAffirmative(normalized)) {
+          await _launchCall(number);
+        }
+        _pendingCallNumber = null;
+        _callPromptInFlight = false;
+      },
+    );
+  }
+
+  bool _isAffirmative(String text) {
+    final lower = text.toLowerCase();
+    if (lower.contains('no') || lower.contains('nah') || lower.contains('nahi')) {
+      return false;
+    }
+    return lower.contains('yes') ||
+        lower.contains('yeah') ||
+        lower.contains('yep') ||
+        lower.contains('call') ||
+        lower.contains('ok') ||
+        lower.contains('haan') ||
+        lower.contains('han') ||
+        lower.contains('ji');
+  }
+
+  String? _bestPhoneCandidate(String text) {
+    final lines = text.split('\n');
+    String? bestNumber;
+    var bestScore = 0;
+    for (final line in lines) {
+      final candidates = _extractPhoneCandidatesFromLine(line);
+      if (candidates.isEmpty) continue;
+      final contextBoost = _phoneContextBoost(line);
+      for (final raw in candidates) {
+        final digits = raw.replaceAll(RegExp(r'\D'), '');
+        if (digits.length < 7 || digits.length > 15) continue;
+        if (_looksLikePrice(raw, line)) continue;
+        var score = 0;
+        if (digits.length == 10) {
+          score += 4;
+        } else if (digits.length >= 11 && digits.length <= 12) {
+          score += 3;
+        } else {
+          score += 1;
+        }
+        if (raw.trim().startsWith('+')) score += 1;
+        score += contextBoost;
+        if (score > bestScore) {
+          bestScore = score;
+          bestNumber = raw.trim().startsWith('+') ? '+$digits' : digits;
+        }
+      }
+    }
+    return bestNumber;
+  }
+
+  List<String> _extractPhoneCandidatesFromLine(String line) {
+    final regex = RegExp(r'(\+?\d[\d\s().-]{6,}\d)');
+    return regex.allMatches(line).map((m) => m.group(0) ?? '').toList();
+  }
+
+  int _phoneContextBoost(String line) {
+    final lower = line.toLowerCase();
+    const keywords = ['phone', 'ph', 'tel', 'call', 'mob', 'mobile', 'contact'];
+    for (final key in keywords) {
+      if (lower.contains(key)) return 2;
+    }
+    return 0;
+  }
+
+  bool _looksLikePrice(String token, String line) {
+    final lower = line.toLowerCase();
+    if (lower.contains('rs') || lower.contains('inr') || lower.contains('\u20b9') || lower.contains('\$')) {
+      final digits = token.replaceAll(RegExp(r'\D'), '');
+      if (digits.length <= 6) return true;
+    }
+    if (token.contains('.') && RegExp(r'\d+\.\d{2}').hasMatch(token)) {
+      return true;
+    }
+    return false;
+  }
+
+  Future<void> _launchCall(String number) async {
+    final uri = Uri(scheme: 'tel', path: number);
+    final canLaunch = await canLaunchUrl(uri);
+    if (!canLaunch) {
+      if (mounted) {
+        setState(() {
+          _latestSmartText = 'Unable to place the call.';
+          _latestSmartEmpty = false;
+        });
+      }
+      return;
+    }
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
+  }
+
+  Future<void> _loadEmergencyContact() async {
+    final prefs = await SharedPreferences.getInstance();
+    final storedName = prefs.getString(_prefEmergencyNameKey) ?? '';
+    final storedNumber = prefs.getString(_prefEmergencyNumberKey) ?? '';
+    final fallbackNumber = EMERGENCY_CONTACT_NUMBER.trim();
+    if (!mounted) return;
+    setState(() {
+      _emergencyContactName = storedName;
+      _emergencyContactNumber =
+          storedNumber.isNotEmpty ? storedNumber : fallbackNumber;
+    });
+  }
+
+  Future<void> _saveEmergencyContact(String name, String number) async {
+    final normalizedNumber = _normalizePhoneNumber(number);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_prefEmergencyNameKey, name.trim());
+    await prefs.setString(_prefEmergencyNumberKey, normalizedNumber);
+    if (!mounted) return;
+    setState(() {
+      _emergencyContactName = name.trim();
+      _emergencyContactNumber = normalizedNumber;
+    });
+  }
+
+  String _normalizePhoneNumber(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return '';
+    final hasPlus = trimmed.startsWith('+');
+    final digits = trimmed.replaceAll(RegExp(r'\D'), '');
+    if (digits.isEmpty) return '';
+    return hasPlus ? '+$digits' : digits;
   }
 
   Uint8List? _buildGeminiImage(CameraImage image) {
@@ -3187,7 +3403,7 @@ class _HomeScreenState extends State<HomeScreen>
   String _detectCurrency(String text) {
     final lower = text.toLowerCase();
     if (lower.contains(r'$')) return r'$';
-    if (lower.contains('₹') || lower.contains('rs') || lower.contains('inr')) {
+    if (lower.contains('?') || lower.contains('rs') || lower.contains('inr')) {
       return '₹';
     }
     return '';
@@ -3196,7 +3412,7 @@ class _HomeScreenState extends State<HomeScreen>
   String _normalizeCurrency(String token, String fallback) {
     final lower = token.toLowerCase();
     if (lower.contains(r'$')) return r'$';
-    if (lower.contains('₹') || lower.contains('rs') || lower.contains('inr')) {
+    if (lower.contains('?') || lower.contains('rs') || lower.contains('inr')) {
       return '₹';
     }
     return fallback;
@@ -3258,12 +3474,9 @@ class _HomeScreenState extends State<HomeScreen>
     final normalizedText = _normalizeText(ocrText);
     if (normalizedText.isEmpty) return false;
     final keywords = _intentKeywordsForQuery(intent);
-    debugPrint('[INTENT] kw: ' + keywords.join(','));
-    debugPrint('[INTENT] ocr: ' + normalizedText.substring(0, normalizedText.length.clamp(0, 100)));
     for (final keyword in keywords) {
       if (keyword.isEmpty) continue;
       if (normalizedText.contains(keyword)) {
-        debugPrint('[INTENT] hit: ' + keyword);
         return true;
       }
     }
@@ -3366,6 +3579,10 @@ class _HomeScreenState extends State<HomeScreen>
       builder: (bottomSheetContext) {
         return StatefulBuilder(
           builder: (BuildContext context, StateSetter setModalState) {
+            final nameController =
+                TextEditingController(text: _emergencyContactName);
+            final numberController =
+                TextEditingController(text: _emergencyContactNumber);
             return Padding(
               padding: EdgeInsets.only(
                 bottom: MediaQuery.of(context).viewInsets.bottom,
@@ -3412,14 +3629,30 @@ class _HomeScreenState extends State<HomeScreen>
                   Text('Emergency Contact', style: GoogleFonts.outfit(fontSize: 18, fontWeight: FontWeight.w600, color: const Color(0xFF1A1A1A))),
                   const SizedBox(height: 8),
                   TextFormField(
+                    controller: nameController,
                     decoration: const InputDecoration(labelText: 'Name', hintText: 'e.g. John Doe'),
                     style: const TextStyle(fontSize: 18, color: Color(0xFF1A1A1A)),
                   ),
                   const SizedBox(height: 12),
                   TextFormField(
+                    controller: numberController,
                     decoration: const InputDecoration(labelText: 'Phone Number', hintText: 'e.g. +1234567890'),
                     keyboardType: TextInputType.phone,
                     style: const TextStyle(fontSize: 18, color: Color(0xFF1A1A1A)),
+                  ),
+                  const SizedBox(height: 12),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: ElevatedButton(
+                      onPressed: () {
+                        unawaited(_saveEmergencyContact(
+                          nameController.text,
+                          numberController.text,
+                        ));
+                        setModalState(() {});
+                      },
+                      child: const Text('Save Contact'),
+                    ),
                   ),
                   const SizedBox(height: 24),
                   // Sound Toggle
@@ -3446,3 +3679,4 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 }
+

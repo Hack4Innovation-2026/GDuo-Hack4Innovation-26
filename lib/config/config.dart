@@ -1,16 +1,3 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// DrishtiAI Configuration
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// IMPORTANT: Replace GEMINI_API_KEY with your real key before Phase 4 testing.
-// Never commit this file with a real key to version control.
-//
-// ignore_for_file: constant_identifier_names
-
-/// Your Gemini 1.5 Flash API key.
-/// Leave as-is until Phase 4 — the app will not call Gemini before that phase.
-const String GEMINI_API_KEY = 'AIzaSyA_HhasPrATdqwWTcpfOwqbzEkMcZAdeAo';
-
 /// Gemini REST endpoint
 const String GEMINI_ENDPOINT =
     'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
@@ -50,3 +37,6 @@ const int MAX_CONVERSATION_ROWS = 20;
 
 /// App name shown in UI
 const String APP_NAME = 'DrishtiAI';
+
+/// Emergency contact number (tap to call). Leave empty to hide the button.
+const String EMERGENCY_CONTACT_NUMBER = '9876543210';

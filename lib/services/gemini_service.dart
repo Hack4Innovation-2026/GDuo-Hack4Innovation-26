@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 
 import '../config/config.dart';
@@ -12,12 +13,17 @@ class GeminiService {
   })  : _apiKey = apiKey ??
             (const String.fromEnvironment('GEMINI_API_KEY').isNotEmpty
                 ? const String.fromEnvironment('GEMINI_API_KEY')
-                : GEMINI_API_KEY),
+                : (dotenv.isInitialized &&
+                        (dotenv.env['GEMINI_API_KEY'] ?? '').isNotEmpty
+                    ? dotenv.env['GEMINI_API_KEY']!
+                    : '')),
         _model = model ??
-            const String.fromEnvironment(
-              'GEMINI_MODEL',
-              defaultValue: 'gemini-2.5-flash',
-            );
+            (const String.fromEnvironment('GEMINI_MODEL').isNotEmpty
+                ? const String.fromEnvironment('GEMINI_MODEL')
+                : (dotenv.isInitialized &&
+                        (dotenv.env['GEMINI_MODEL'] ?? '').isNotEmpty
+                    ? dotenv.env['GEMINI_MODEL']!
+                    : 'gemini-2.5-flash'));
 
   final String _apiKey;
   final String _model;
