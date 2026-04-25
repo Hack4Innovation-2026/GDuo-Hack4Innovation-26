@@ -115,7 +115,9 @@ class _HomeScreenState extends State<HomeScreen>
   String? _activeIntentQuery;
   DateTime _lastIntentCall = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastIntentSpokenTime = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastIntentMapsLaunchAt = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastIntentKey = '';
+  String _lastIntentMapsQuery = '';
   String _lastIntentOcrText = '';
   String? _pendingCallNumber;
   bool _callPromptInFlight = false;
@@ -145,6 +147,7 @@ class _HomeScreenState extends State<HomeScreen>
   static const Duration _conversationRearmDelay = Duration(milliseconds: 300);
   static const Duration _intentCooldown = Duration(seconds: 4);
   static const Duration _intentScanInterval = Duration(milliseconds: 900);
+  static const Duration _intentMapsLaunchCooldown = Duration(seconds: 8);
   static const Duration _callPromptCooldown = Duration(seconds: 20);
   static const Map<String, String> _intentCategoryNames = {
     'medical': 'Medical store',
@@ -1196,7 +1199,9 @@ class _HomeScreenState extends State<HomeScreen>
         _activeIntentQuery = null;
         _lastIntentCall = DateTime.fromMillisecondsSinceEpoch(0);
         _lastIntentSpokenTime = DateTime.fromMillisecondsSinceEpoch(0);
+        _lastIntentMapsLaunchAt = DateTime.fromMillisecondsSinceEpoch(0);
         _lastIntentKey = '';
+        _lastIntentMapsQuery = '';
         _pendingCallNumber = null;
         _callPromptInFlight = false;
         _lastCallPromptAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -1301,6 +1306,7 @@ class _HomeScreenState extends State<HomeScreen>
         if (trimmed.isEmpty) return;
         _pendingIntentQuery = trimmed;
         _activeIntentQuery = trimmed;
+        await _maybeOpenMapsForIntentQuery(trimmed);
       },
     );
   }
@@ -3500,6 +3506,59 @@ class _HomeScreenState extends State<HomeScreen>
       }
     }
     return intent.trim();
+  }
+
+  Future<void> _maybeOpenMapsForIntentQuery(String intentQuery) async {
+    final trimmed = intentQuery.trim();
+    if (trimmed.isEmpty) return;
+
+    final mapsQuery = _mapsQueryForIntent(trimmed);
+    if (mapsQuery.isEmpty) return;
+
+    final normalizedQuery = _normalizeText(mapsQuery);
+    final now = DateTime.now();
+    if (_lastIntentMapsQuery == normalizedQuery &&
+        now.difference(_lastIntentMapsLaunchAt) < _intentMapsLaunchCooldown) {
+      return;
+    }
+
+    _lastIntentMapsQuery = normalizedQuery;
+    _lastIntentMapsLaunchAt = now;
+
+    final uri = Uri.parse(
+      'https://www.google.com/maps/search/?api=1&query=${Uri.encodeComponent(mapsQuery)}',
+    );
+    final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!launched) {
+      if (mounted) {
+        setState(() {
+          _latestGeminiError = 'Unable to open Google Maps.';
+          _latestSmartEmpty = false;
+        });
+      }
+      return;
+    }
+
+    if (mounted) {
+      final label = _canonicalIntentName(trimmed);
+      setState(() {
+        _latestSmartText = 'Opening Google Maps for $label';
+        _latestGeminiError = null;
+        _latestSmartEmpty = false;
+      });
+    }
+  }
+
+  String _mapsQueryForIntent(String intentQuery) {
+    final lower = intentQuery.toLowerCase();
+    final hasLocationHint = RegExp(
+      r'\b(near|nearby|nearest|around|in|at|to|towards|from|close)\b',
+      caseSensitive: false,
+    ).hasMatch(lower);
+    if (hasLocationHint) return intentQuery;
+
+    final canonical = _canonicalIntentName(intentQuery);
+    return '$canonical near me';
   }
 
   bool _isNoiseLine(String line) {
