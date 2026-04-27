@@ -15,7 +15,7 @@ const String INDOOR_YOLO_MODEL_ASSET = 'assets/models/indoor.onnx';
 const String INDOOR_LABELS_ASSET = 'assets/models/indoor_labels.txt';
 
 /// Path to the signboard YOLOv8 ONNX model asset
-const String SIGNBOARD_YOLO_MODEL_ASSET = 'assets/models/signboard.onnx';
+const String SIGNBOARD_YOLO_MODEL_ASSET = 'assets/models/Signboard_v1.onnx';
 
 /// Path to the signboard model class labels asset
 const String SIGNBOARD_LABELS_ASSET = 'assets/models/signboard_labels.txt';

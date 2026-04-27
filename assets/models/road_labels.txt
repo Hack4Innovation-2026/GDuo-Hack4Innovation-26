@@ -1,7 +1,6 @@
-drivable
-non_drivable
-living
-vehicle
-roadside
-far
-sky
+Ambulance
+Bus
+Car
+Motorcycle
+Truck
+pothole

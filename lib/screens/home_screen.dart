@@ -93,6 +93,7 @@ class _HomeScreenState extends State<HomeScreen>
   String? _signboardError;
   List<YoloDetection> _latestSignboardDetections = [];
   DateTime _lastAnalysisTime = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastOcrTime = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastYoloTime = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastIndoorTime = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastEmitTime = DateTime.fromMillisecondsSinceEpoch(0);
@@ -138,7 +139,8 @@ class _HomeScreenState extends State<HomeScreen>
   int _signboardLandmarkStreak = 0;
   YoloDetection? _lastSignboardDetection;
 
-  static const Duration _analysisInterval = Duration(milliseconds: 400);
+  static const Duration _analysisInterval = Duration(milliseconds: 250);
+  static const Duration _ocrInterval = Duration(milliseconds: 650);
   static const Duration _emitCooldown = Duration(milliseconds: 1500);
   static const Duration _speechCooldown = Duration(seconds: 4);
   static const Duration _alertSpeakCooldown = Duration(seconds: 4);
@@ -177,12 +179,12 @@ class _HomeScreenState extends State<HomeScreen>
     'police': ['police', 'station', 'ps'],
     'fuel': ['fuel', 'petrol', 'diesel', 'gas', 'pump', 'filling'],
   };
-  static const Duration _yoloInterval = Duration(milliseconds: 900);
-  static const int _yoloFrameStride = 4;
-  static const int _indoorFrameStride = 4;
+  static const Duration _yoloInterval = Duration(milliseconds: 1200);
+  static const int _yoloFrameStride = 5;
+  static const int _indoorFrameStride = 6;
   static const int _indoorFrameOffset = 2;
-  static const Duration _signboardInterval = Duration(milliseconds: 900);
-  static const int _signboardFrameStride = 4;
+  static const Duration _signboardInterval = Duration(milliseconds: 350);
+  static const int _signboardFrameStride = 2;
   static const int _signboardFrameOffset = 1;
   static const Duration _signboardSpeakCooldown = Duration(seconds: 6);
   static const Duration _signboardLandmarkHold = Duration(seconds: 2);
@@ -1080,7 +1082,7 @@ class _HomeScreenState extends State<HomeScreen>
       );
       final controller = CameraController(
         selectedCamera,
-        ResolutionPreset.medium,
+        ResolutionPreset.high,
         enableAudio: false,
         imageFormatGroup: Platform.isIOS ? ImageFormatGroup.bgra8888 : ImageFormatGroup.yuv420,
       );
@@ -1881,10 +1883,10 @@ class _HomeScreenState extends State<HomeScreen>
         for (final line in block.lines) {
           final box = line.boundingBox;
           if (box == null) continue;
-          final bestRect = bestRectFor(box, 0.2);
+          final bestRect = bestRectFor(box, 0.12);
           if (bestRect == null) continue;
           final heightRatio = box.height / bestRect.height;
-          if (heightRatio < 0.03 || heightRatio > 0.95) continue;
+          if (heightRatio < 0.02 || heightRatio > 0.95) continue;
           final raw = line.text.trim();
           if (raw.isEmpty) continue;
           if (!_lineLooksValid(raw)) continue;
@@ -1900,10 +1902,10 @@ class _HomeScreenState extends State<HomeScreen>
         for (final block in result.blocks) {
           final box = block.boundingBox;
           if (box == null) continue;
-          final bestRect = bestRectFor(box, 0.2);
+          final bestRect = bestRectFor(box, 0.12);
           if (bestRect == null) continue;
           final heightRatio = box.height / bestRect.height;
-          if (heightRatio < 0.03 || heightRatio > 0.95) continue;
+          if (heightRatio < 0.02 || heightRatio > 0.95) continue;
           final raw = block.text.trim();
           if (raw.isEmpty) continue;
           if (!_lineLooksValid(raw)) continue;
@@ -1928,14 +1930,14 @@ class _HomeScreenState extends State<HomeScreen>
 
   List<Rect> _getActiveSignboardRects(List<YoloDetection> signboards) {
     if (signboards.isNotEmpty) {
-      return signboards.map((d) => _expandRect(d.rect, 0.15)).toList();
+      return signboards.map((d) => _expandRect(d.rect, 0.22)).toList();
     }
     final now = DateTime.now();
     if (_signboardLandmark == null) return const [];
     if (now.difference(_signboardLandmarkAt) > _signboardLandmarkHold) {
       return const [];
     }
-    return [_expandRect(_signboardLandmark!, 0.18)];
+    return [_expandRect(_signboardLandmark!, 0.28)];
   }
 
   Rect _expandRect(Rect rect, double padRatio) {
@@ -1969,8 +1971,8 @@ class _HomeScreenState extends State<HomeScreen>
     if (text.isEmpty) return text;
     final cleaned = text.replaceAll(RegExp(r'\s+'), ' ').trim();
     final words = cleaned.split(' ');
-    if (words.length <= 12) return cleaned;
-    return words.take(12).join(' ');
+    if (words.length <= 30) return cleaned;
+    return words.take(30).join(' ');
   }
 
   String _cleanSignboardText(String text) {
@@ -2290,13 +2292,16 @@ class _HomeScreenState extends State<HomeScreen>
     try {
       final inputImage = _inputImageFromCameraImage(image);
       if (inputImage == null) return;
-      final results = await Future.wait([
-        _latinTextRecognizer.processImage(inputImage),
-        _devanagariTextRecognizer.processImage(inputImage),
-        _tamilTextRecognizer.processImage(inputImage),
-      ]);
-      final ocrResults = results;
-      final mergedText = _mergeRecognizedText(results);
+      final forceOcr = _pendingConversationQuestion != null || _intentModeEnabled || !_signboardReady;
+      final shouldRunOcr = forceOcr || now.difference(_lastOcrTime) >= _ocrInterval;
+      List<RecognizedText> ocrResults = const [];
+      var mergedText = _lastIntentOcrText;
+      if (shouldRunOcr) {
+        final recognizers = _activeRecognizersForCurrentLanguage();
+        ocrResults = await Future.wait(recognizers.map((r) => r.processImage(inputImage)));
+        mergedText = _mergeRecognizedText(ocrResults);
+        _lastOcrTime = now;
+      }
       _updateOcrPreview(mergedText);
       if (mergedText.trim().isNotEmpty) {
         _lastIntentOcrText = mergedText.trim();
@@ -2585,6 +2590,17 @@ class _HomeScreenState extends State<HomeScreen>
       buffer.putUint8List(plane.bytes);
     }
     return buffer.done().buffer.asUint8List();
+  }
+
+  List<TextRecognizer> _activeRecognizersForCurrentLanguage() {
+    switch (_selectedLanguage) {
+      case 'Hindi':
+        return [_latinTextRecognizer, _devanagariTextRecognizer];
+      case 'Tamil':
+        return [_latinTextRecognizer, _tamilTextRecognizer];
+      default:
+        return [_latinTextRecognizer];
+    }
   }
 
   String _mergeRecognizedText(List<RecognizedText> results) {

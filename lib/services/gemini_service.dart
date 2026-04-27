@@ -1,32 +1,38 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 
-import '../config/config.dart';
-
 class GeminiService {
   GeminiService({
     String? apiKey,
     String? model,
-  })  : _apiKey = apiKey ??
-            (const String.fromEnvironment('GEMINI_API_KEY').isNotEmpty
-                ? const String.fromEnvironment('GEMINI_API_KEY')
-                : (dotenv.isInitialized &&
-                        (dotenv.env['GEMINI_API_KEY'] ?? '').isNotEmpty
-                    ? dotenv.env['GEMINI_API_KEY']!
-                    : '')),
-        _model = model ??
-            (const String.fromEnvironment('GEMINI_MODEL').isNotEmpty
-                ? const String.fromEnvironment('GEMINI_MODEL')
-                : (dotenv.isInitialized &&
-                        (dotenv.env['GEMINI_MODEL'] ?? '').isNotEmpty
-                    ? dotenv.env['GEMINI_MODEL']!
-                    : 'gemini-2.5-flash'));
+  })  : _apiKey = _firstNonEmpty([
+          apiKey,
+          const String.fromEnvironment('GEMINI_API_KEY'),
+          dotenv.isInitialized ? dotenv.env['GEMINI_API_KEY'] : null,
+        ]),
+        _model = _firstNonEmpty([
+          model,
+          const String.fromEnvironment('GEMINI_MODEL'),
+          dotenv.isInitialized ? dotenv.env['GEMINI_MODEL'] : null,
+          'gemini-2.5-flash',
+        ]);
 
   final String _apiKey;
   final String _model;
+
+  static const Duration _requestTimeout = Duration(seconds: 25);
+
+  static String _firstNonEmpty(List<String?> values) {
+    for (final value in values) {
+      final trimmed = value?.trim() ?? '';
+      if (trimmed.isNotEmpty) return trimmed;
+    }
+    return '';
+  }
 
   bool get hasApiKey => _apiKey.isNotEmpty;
 
@@ -67,14 +73,11 @@ If unclear, return {"match":false}.
     required Uint8List jpegBytes,
     String? preferredLanguage,
   }) async {
-    if (_apiKey.isEmpty) {
-      // Avoid spamming logs on every frame.
-      return null;
-    }
+    if (_apiKey.isEmpty) return null;
 
-    final languageHint = (preferredLanguage == null || preferredLanguage!.trim().isEmpty)
+    final languageHint = (preferredLanguage == null || preferredLanguage.trim().isEmpty)
         ? 'Auto'
-        : preferredLanguage!.trim();
+        : preferredLanguage.trim();
     final prompt = '''
 OCR TEXT:
 $ocrText
@@ -117,31 +120,18 @@ If nothing useful exists, return {"speak":"","action":null}.
     });
 
     final response = await _postWithFallback(body);
-
     if (response.statusCode != 200) {
-      throw Exception('Gemini HTTP ${response.statusCode}');
+      throw Exception(_httpErrorMessage(response));
     }
 
-    final decoded = jsonDecode(response.body) as Map<String, dynamic>;
-    final candidates = decoded['candidates'] as List<dynamic>?;
-    if (candidates == null || candidates.isEmpty) {
-      return null;
-    }
-    final content = candidates.first['content'] as Map<String, dynamic>?;
-    final parts = content?['parts'] as List<dynamic>?;
-    if (parts == null || parts.isEmpty) {
-      return null;
-    }
-    final rawText = parts.first['text']?.toString() ?? '';
-    if (rawText.isEmpty) {
-      return null;
-    }
+    final rawText = _extractPrimaryText(response.body);
+    if (rawText.isEmpty) return null;
 
     final parsed = _parseJson(rawText);
-    if (parsed == null) {
-      throw Exception('Unable to parse Gemini JSON response.');
-    }
-    return parsed;
+    if (parsed != null) return parsed;
+
+    // Fallback to plain text answer when model returns non-JSON text.
+    return GeminiResult(speak: _fallbackSpeak(rawText), action: null);
   }
 
   Future<GeminiResult?> analyzeConversation({
@@ -150,9 +140,7 @@ If nothing useful exists, return {"speak":"","action":null}.
     required Uint8List jpegBytes,
     String? preferredLanguage,
   }) async {
-    if (_apiKey.isEmpty) {
-      return null;
-    }
+    if (_apiKey.isEmpty) return null;
 
     final languageHint = (preferredLanguage == null || preferredLanguage.trim().isEmpty)
         ? 'Auto'
@@ -202,31 +190,16 @@ If nothing useful exists, return {"speak":"","action":null}.
     });
 
     final response = await _postWithFallback(body);
-
     if (response.statusCode != 200) {
-      throw Exception('Gemini HTTP ${response.statusCode}');
+      throw Exception(_httpErrorMessage(response));
     }
 
-    final decoded = jsonDecode(response.body) as Map<String, dynamic>;
-    final candidates = decoded['candidates'] as List<dynamic>?;
-    if (candidates == null || candidates.isEmpty) {
-      return null;
-    }
-    final content = candidates.first['content'] as Map<String, dynamic>?;
-    final parts = content?['parts'] as List<dynamic>?;
-    if (parts == null || parts.isEmpty) {
-      return null;
-    }
-    final rawText = parts.first['text']?.toString() ?? '';
-    if (rawText.isEmpty) {
-      return null;
-    }
+    final rawText = _extractPrimaryText(response.body);
+    if (rawText.isEmpty) return null;
 
     final parsed = _parseJson(rawText);
-    if (parsed == null) {
-      throw Exception('Unable to parse Gemini JSON response.');
-    }
-    return parsed;
+    if (parsed != null) return parsed;
+    return GeminiResult(speak: _fallbackSpeak(rawText), action: null);
   }
 
   Future<IntentMatch?> analyzeIntent({
@@ -234,9 +207,7 @@ If nothing useful exists, return {"speak":"","action":null}.
     required String ocrText,
     required Uint8List jpegBytes,
   }) async {
-    if (_apiKey.isEmpty) {
-      return null;
-    }
+    if (_apiKey.isEmpty) return null;
 
     final prompt = '''
 USER INTENT:
@@ -278,31 +249,16 @@ or
     });
 
     final response = await _postWithFallback(body);
-
     if (response.statusCode != 200) {
-      throw Exception('Gemini HTTP ${response.statusCode}');
+      throw Exception(_httpErrorMessage(response));
     }
 
-    final decoded = jsonDecode(response.body) as Map<String, dynamic>;
-    final candidates = decoded['candidates'] as List<dynamic>?;
-    if (candidates == null || candidates.isEmpty) {
-      return null;
-    }
-    final content = candidates.first['content'] as Map<String, dynamic>?;
-    final parts = content?['parts'] as List<dynamic>?;
-    if (parts == null || parts.isEmpty) {
-      return null;
-    }
-    final rawText = parts.first['text']?.toString() ?? '';
-    if (rawText.isEmpty) {
-      return null;
-    }
+    final rawText = _extractPrimaryText(response.body);
+    if (rawText.isEmpty) return null;
 
     final parsed = _parseIntentJson(rawText);
-    if (parsed == null) {
-      throw Exception('Unable to parse Gemini intent JSON response.');
-    }
-    return parsed;
+    if (parsed != null) return parsed;
+    return _fallbackIntent(rawText);
   }
 
   Future<http.Response> _postWithFallback(Object body) async {
@@ -313,48 +269,99 @@ or
       'gemini-2.5-pro',
       'gemini-2.5-pro-latest',
       'gemini-2.5-flash-lite',
+      'gemini-1.5-flash',
+      'gemini-1.5-flash-latest',
     ];
     http.Response? lastResponse;
     final seen = <String>{};
     for (final model in candidates) {
       final trimmed = model.trim();
-      if (trimmed.isEmpty) continue;
-      if (!seen.add(trimmed)) continue;
+      if (trimmed.isEmpty || !seen.add(trimmed)) continue;
+
       final uri = Uri.parse(
         'https://generativelanguage.googleapis.com/v1beta/models/$trimmed:generateContent?key=$_apiKey',
       );
-      final response = await http.post(
-        uri,
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: body,
-      );
+      final response = await http
+          .post(
+            uri,
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: body,
+          )
+          .timeout(_requestTimeout);
+
       lastResponse = response;
-      if (response.statusCode == 200) {
-        return response;
-      }
-      if (response.statusCode != 404) {
-        return response;
-      }
+      if (response.statusCode == 200) return response;
+      // For non-model-not-found errors, return immediately.
+      if (response.statusCode != 404) return response;
     }
-    if (lastResponse != null) {
-      return lastResponse;
-    }
+
+    if (lastResponse != null) return lastResponse;
     throw Exception('Gemini HTTP 404');
   }
 
-  GeminiResult? _parseJson(String rawText) {
-    final start = rawText.indexOf('{');
-    final end = rawText.lastIndexOf('}');
-    if (start == -1 || end == -1 || end <= start) {
-      return null;
+  String _extractPrimaryText(String responseBody) {
+    final decoded = jsonDecode(responseBody) as Map<String, dynamic>;
+    final candidates = decoded['candidates'] as List<dynamic>?;
+    if (candidates == null || candidates.isEmpty) return '';
+
+    final content = candidates.first['content'] as Map<String, dynamic>?;
+    final parts = content?['parts'] as List<dynamic>?;
+    if (parts == null || parts.isEmpty) return '';
+
+    final buffer = StringBuffer();
+    for (final part in parts) {
+      if (part is Map<String, dynamic>) {
+        final text = part['text']?.toString() ?? '';
+        if (text.isNotEmpty) {
+          if (buffer.isNotEmpty) buffer.write('\n');
+          buffer.write(text);
+        }
+      }
     }
-    final jsonText = rawText.substring(start, end + 1);
-    final decoded = jsonDecode(jsonText);
-    if (decoded is! Map<String, dynamic>) return null;
-    final speak = decoded['speak']?.toString() ?? '';
-    final action = decoded['action'];
+    return buffer.toString().trim();
+  }
+
+  String _fallbackSpeak(String rawText) {
+    final cleaned = rawText
+        .replaceAll('```json', '')
+        .replaceAll('```', '')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (cleaned.isEmpty) return '';
+    if (cleaned.length <= 140) return cleaned;
+    return '${cleaned.substring(0, 140).trimRight()}...';
+  }
+
+  String _httpErrorMessage(http.Response response) {
+    final status = response.statusCode;
+    final body = response.body;
+    if (body.isEmpty) return 'Gemini HTTP $status';
+    try {
+      final decoded = jsonDecode(body);
+      if (decoded is Map<String, dynamic>) {
+        final error = decoded['error'];
+        if (error is Map<String, dynamic>) {
+          final message = error['message']?.toString().trim() ?? '';
+          if (message.isNotEmpty) {
+            return 'Gemini HTTP $status: $message';
+          }
+        }
+      }
+    } catch (_) {}
+    final snippet = body.replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (snippet.isEmpty) return 'Gemini HTTP $status';
+    final short = snippet.length <= 160 ? snippet : '${snippet.substring(0, 160)}...';
+    return 'Gemini HTTP $status: $short';
+  }
+
+  GeminiResult? _parseJson(String rawText) {
+    final map = _extractJsonMap(rawText);
+    if (map == null) return null;
+
+    final speak = map['speak']?.toString() ?? '';
+    final action = map['action'];
     GeminiAction? parsedAction;
     if (action is Map<String, dynamic>) {
       final type = action['type']?.toString();
@@ -367,18 +374,59 @@ or
   }
 
   IntentMatch? _parseIntentJson(String rawText) {
-    final start = rawText.indexOf('{');
-    final end = rawText.lastIndexOf('}');
-    if (start == -1 || end == -1 || end <= start) {
-      return null;
-    }
-    final jsonText = rawText.substring(start, end + 1);
-    final decoded = jsonDecode(jsonText);
-    if (decoded is! Map<String, dynamic>) return null;
-    final match = decoded['match'];
+    final map = _extractJsonMap(rawText);
+    if (map == null) return null;
+
+    final match = map['match'];
     if (match is! bool) return null;
-    final category = decoded['category']?.toString();
+    final category = map['category']?.toString();
     return IntentMatch(match: match, category: category);
+  }
+
+  Map<String, dynamic>? _extractJsonMap(String rawText) {
+    // Fast path: full text is JSON.
+    try {
+      final direct = jsonDecode(rawText);
+      if (direct is Map<String, dynamic>) return direct;
+    } catch (_) {}
+
+    // Remove code fences and retry.
+    final cleaned = rawText.replaceAll('```json', '').replaceAll('```', '').trim();
+    try {
+      final decoded = jsonDecode(cleaned);
+      if (decoded is Map<String, dynamic>) return decoded;
+    } catch (_) {}
+
+    // Brace-balanced extraction fallback.
+    final start = cleaned.indexOf('{');
+    if (start < 0) return null;
+    var depth = 0;
+    for (var i = start; i < cleaned.length; i++) {
+      final ch = cleaned[i];
+      if (ch == '{') depth++;
+      if (ch == '}') {
+        depth--;
+        if (depth == 0) {
+          final candidate = cleaned.substring(start, i + 1);
+          try {
+            final decoded = jsonDecode(candidate);
+            if (decoded is Map<String, dynamic>) return decoded;
+          } catch (_) {
+            return null;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  IntentMatch _fallbackIntent(String rawText) {
+    final lower = rawText.toLowerCase();
+    final matched = lower.contains('"match":true') ||
+        lower.contains('"match": true') ||
+        lower.contains('match true') ||
+        lower.contains('yes');
+    return IntentMatch(match: matched, category: null);
   }
 }
 
