@@ -78,6 +78,7 @@ If unclear, return {"match":false}.
     final languageHint = (preferredLanguage == null || preferredLanguage.trim().isEmpty)
         ? 'Auto'
         : preferredLanguage.trim();
+
     final prompt = '''
 OCR TEXT:
 $ocrText
@@ -145,6 +146,7 @@ If nothing useful exists, return {"speak":"","action":null}.
     final languageHint = (preferredLanguage == null || preferredLanguage.trim().isEmpty)
         ? 'Auto'
         : preferredLanguage.trim();
+
     final prompt = '''
 USER QUESTION:
 $question
@@ -362,6 +364,7 @@ or
 
     final speak = map['speak']?.toString() ?? '';
     final action = map['action'];
+
     GeminiAction? parsedAction;
     if (action is Map<String, dynamic>) {
       final type = action['type']?.toString();

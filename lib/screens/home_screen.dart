@@ -16,6 +16,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../config/config.dart';
 import '../services/voice_assistant_service.dart';
 import '../services/gemini_service.dart';
+import '../services/person_recognition_service.dart';
 import '../services/yolo_detector_service.dart';
 
 enum HomeState { idle, permission, scanning }
@@ -68,6 +69,7 @@ class _HomeScreenState extends State<HomeScreen>
 
   late final VoiceAssistantService _voiceAssistant;
   late final GeminiService _geminiService;
+  late final PersonRecognitionService _personRecognitionService;
   late final AnimationController _micPulseController;
   late final Animation<double> _micPulseAnimation;
   late final VoidCallback _micListeningListener;
@@ -106,7 +108,14 @@ class _HomeScreenState extends State<HomeScreen>
   DateTime _lastGeminiCall = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastGeminiText = '';
   bool _geminiInFlight = false;
+  bool _personRecognitionInFlight = false;
   bool _latestSmartEmpty = false;
+  String _latestPersonMessage = '';
+  String? _personRecognitionError;
+  DateTime _lastPersonRecognitionTime = DateTime.fromMillisecondsSinceEpoch(0);
+  Uint8List? _latestRegistrationFrame;
+  DateTime _latestRegistrationFrameAt = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _personRegistrationInFlight = false;
   bool _conversationModeEnabled = false;
   bool _conversationInFlight = false;
   String? _pendingConversationQuestion;
@@ -168,7 +177,7 @@ class _HomeScreenState extends State<HomeScreen>
   static const Map<String, List<String>> _intentKeywordHints = {
     'medical': ['medical', 'pharmacy', 'chemist', 'drug', 'drugs', 'medicine', 'pharma'],
     'hospital': ['hospital', 'clinic', 'emergency', 'er', 'casualty'],
-    'restaurant': ['restaurant', 'cafe', 'café', 'dhaba', 'eatery', 'food', 'tiffin', 'hotel'],
+    'restaurant': ['restaurant', 'cafe', 'caf├⌐', 'dhaba', 'eatery', 'food', 'tiffin', 'hotel'],
     'grocery': ['grocery', 'supermarket', 'mart', 'store', 'kirana', 'provisions'],
     'bank': ['bank', 'atm', 'cash', 'finance'],
     'hotel': ['hotel', 'lodge', 'inn', 'resort', 'guest house', 'guesthouse'],
@@ -449,84 +458,84 @@ class _HomeScreenState extends State<HomeScreen>
   };
 
   static const Map<String, String> _hindiLabels = {
-    'vehicle': 'वाहन',
-    'living': 'व्यक्ति',
-    'roadside': 'रोडसाइड वस्तु',
-    'non_drivable': 'असुरक्षित सतह',
-    'drivable': 'सड़क',
-    'far': 'दूर क्षेत्र',
-    'sky': 'आसमान',
-    'car': 'कार',
-    'truck': 'ट्रक',
-    'bus': 'बस',
-    'motorcycle': 'मोटरसाइकिल',
-    'bicycle': 'साइकिल',
-    'scooter': 'स्कूटर',
-    'autorickshaw': 'ऑटो',
-    'rickshaw': 'रिक्शा',
-    'pothole': 'गड्ढा',
-    'speedbump': 'स्पीड ब्रेकर',
-    'bump': 'स्पीड ब्रेकर',
-    'barricade': 'बैरिकेड',
-    'barrier': 'बैरियर',
-    'construction': 'निर्माण क्षेत्र',
-    'cone': 'कोन',
-    'electricpole': 'बिजली का खंभा',
-    'powerpole': 'बिजली का खंभा',
-    'streetlight': 'स्ट्रीट लाइट',
-    'door': 'दरवाज़ा',
-    'openeddoor': 'खुला दरवाज़ा',
-    'cabinetdoor': 'कैबिनेट दरवाज़ा',
-    'refrigeratordoor': 'फ्रिज का दरवाज़ा',
-    'chair': 'कुर्सी',
-    'table': 'मेज',
-    'cabinet': 'कैबिनेट',
-    'couch': 'सोफ़ा',
-    'pole': 'खंभा',
-    'vehiclehazard': 'वाहन खतरा',
-    'humannearby': 'व्यक्ति पास में',
-    'animalhazard': 'जानवर खतरा',
-    'roadhazard': 'सड़क खतरा',
-    'roadsideobstacle': 'सड़क किनारे बाधा',
+    'vehicle': 'αñ╡αñ╛αñ╣αñ¿',
+    'living': 'αñ╡αÑìαñ»αñòαÑìαññαñ┐',
+    'roadside': 'αñ░αÑïαñíαñ╕αñ╛αñçαñí αñ╡αñ╕αÑìαññαÑü',
+    'non_drivable': 'αñàαñ╕αÑüαñ░αñòαÑìαñ╖αñ┐αññ αñ╕αññαñ╣',
+    'drivable': 'αñ╕αñíαñ╝αñò',
+    'far': 'αñªαÑéαñ░ αñòαÑìαñ╖αÑçαññαÑìαñ░',
+    'sky': 'αñåαñ╕αñ«αñ╛αñ¿',
+    'car': 'αñòαñ╛αñ░',
+    'truck': 'αñƒαÑìαñ░αñò',
+    'bus': 'αñ¼αñ╕',
+    'motorcycle': 'αñ«αÑïαñƒαñ░αñ╕αñ╛αñçαñòαñ┐αñ▓',
+    'bicycle': 'αñ╕αñ╛αñçαñòαñ┐αñ▓',
+    'scooter': 'αñ╕αÑìαñòαÑéαñƒαñ░',
+    'autorickshaw': 'αñæαñƒαÑï',
+    'rickshaw': 'αñ░αñ┐αñòαÑìαñ╢αñ╛',
+    'pothole': 'αñùαñíαÑìαñóαñ╛',
+    'speedbump': 'αñ╕αÑìαñ¬αÑÇαñí αñ¼αÑìαñ░αÑçαñòαñ░',
+    'bump': 'αñ╕αÑìαñ¬αÑÇαñí αñ¼αÑìαñ░αÑçαñòαñ░',
+    'barricade': 'αñ¼αÑêαñ░αñ┐αñòαÑçαñí',
+    'barrier': 'αñ¼αÑêαñ░αñ┐αñ»αñ░',
+    'construction': 'αñ¿αñ┐αñ░αÑìαñ«αñ╛αñú αñòαÑìαñ╖αÑçαññαÑìαñ░',
+    'cone': 'αñòαÑïαñ¿',
+    'electricpole': 'αñ¼αñ┐αñ£αñ▓αÑÇ αñòαñ╛ αñûαñéαñ¡αñ╛',
+    'powerpole': 'αñ¼αñ┐αñ£αñ▓αÑÇ αñòαñ╛ αñûαñéαñ¡αñ╛',
+    'streetlight': 'αñ╕αÑìαñƒαÑìαñ░αÑÇαñƒ αñ▓αñ╛αñçαñƒ',
+    'door': 'αñªαñ░αñ╡αñ╛αñ£αñ╝αñ╛',
+    'openeddoor': 'αñûαÑüαñ▓αñ╛ αñªαñ░αñ╡αñ╛αñ£αñ╝αñ╛',
+    'cabinetdoor': 'αñòαÑêαñ¼αñ┐αñ¿αÑçαñƒ αñªαñ░αñ╡αñ╛αñ£αñ╝αñ╛',
+    'refrigeratordoor': 'αñ½αÑìαñ░αñ┐αñ£ αñòαñ╛ αñªαñ░αñ╡αñ╛αñ£αñ╝αñ╛',
+    'chair': 'αñòαÑüαñ░αÑìαñ╕αÑÇ',
+    'table': 'αñ«αÑçαñ£',
+    'cabinet': 'αñòαÑêαñ¼αñ┐αñ¿αÑçαñƒ',
+    'couch': 'αñ╕αÑïαñ½αñ╝αñ╛',
+    'pole': 'αñûαñéαñ¡αñ╛',
+    'vehiclehazard': 'αñ╡αñ╛αñ╣αñ¿ αñûαññαñ░αñ╛',
+    'humannearby': 'αñ╡αÑìαñ»αñòαÑìαññαñ┐ αñ¬αñ╛αñ╕ αñ«αÑçαñé',
+    'animalhazard': 'αñ£αñ╛αñ¿αñ╡αñ░ αñûαññαñ░αñ╛',
+    'roadhazard': 'αñ╕αñíαñ╝αñò αñûαññαñ░αñ╛',
+    'roadsideobstacle': 'αñ╕αñíαñ╝αñò αñòαñ┐αñ¿αñ╛αñ░αÑç αñ¼αñ╛αñºαñ╛',
   };
 
   static const Map<String, String> _hindiGuidance = {
-    'vehicle': 'बाईं ओर रहें।',
-    'living': 'रास्ता दें।',
-    'roadside': 'सावधान रहें।',
-    'non_drivable': 'सावधान रहें।',
-    'car': 'बाईं ओर रहें।',
-    'truck': 'बाईं ओर रहें।',
-    'bus': 'बाईं ओर रहें।',
-    'motorcycle': 'बाईं ओर रहें।',
-    'bicycle': 'बाईं ओर रहें।',
-    'autorickshaw': 'बाईं ओर रहें।',
-    'rickshaw': 'बाईं ओर रहें।',
-    'scooter': 'बाईं ओर रहें।',
-    'pothole': 'सावधान रहें।',
-    'speedbump': 'धीरे चलें।',
-    'bump': 'धीरे चलें।',
-    'barricade': 'सावधान रहें।',
-    'barrier': 'सावधान रहें।',
-    'construction': 'सावधान रहें।',
-    'cone': 'सावधान रहें।',
-    'door': 'सावधान रहें।',
-    'openeddoor': 'सावधान रहें।',
-    'cabinetdoor': 'सावधान रहें।',
-    'refrigeratordoor': 'सावधान रहें।',
-    'chair': 'सावधान रहें।',
-    'table': 'सावधान रहें।',
-    'cabinet': 'सावधान रहें।',
-    'couch': 'सावधान रहें।',
-    'pole': 'सावधान रहें।',
-    'electricpole': 'सावधान रहें।',
-    'powerpole': 'सावधान रहें।',
-    'streetlight': 'सावधान रहें।',
-    'vehiclehazard': 'बाईं ओर रहें।',
-    'humannearby': 'धीरे चलें।',
-    'animalhazard': 'सावधान रहें।',
-    'roadhazard': 'सावधान रहें।',
-    'roadsideobstacle': 'सावधान रहें।',
+    'vehicle': 'αñ¼αñ╛αñêαñé αñôαñ░ αñ░αñ╣αÑçαñéαÑñ',
+    'living': 'αñ░αñ╛αñ╕αÑìαññαñ╛ αñªαÑçαñéαÑñ',
+    'roadside': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
+    'non_drivable': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
+    'car': 'αñ¼αñ╛αñêαñé αñôαñ░ αñ░αñ╣αÑçαñéαÑñ',
+    'truck': 'αñ¼αñ╛αñêαñé αñôαñ░ αñ░αñ╣αÑçαñéαÑñ',
+    'bus': 'αñ¼αñ╛αñêαñé αñôαñ░ αñ░αñ╣αÑçαñéαÑñ',
+    'motorcycle': 'αñ¼αñ╛αñêαñé αñôαñ░ αñ░αñ╣αÑçαñéαÑñ',
+    'bicycle': 'αñ¼αñ╛αñêαñé αñôαñ░ αñ░αñ╣αÑçαñéαÑñ',
+    'autorickshaw': 'αñ¼αñ╛αñêαñé αñôαñ░ αñ░αñ╣αÑçαñéαÑñ',
+    'rickshaw': 'αñ¼αñ╛αñêαñé αñôαñ░ αñ░αñ╣αÑçαñéαÑñ',
+    'scooter': 'αñ¼αñ╛αñêαñé αñôαñ░ αñ░αñ╣αÑçαñéαÑñ',
+    'pothole': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
+    'speedbump': 'αñºαÑÇαñ░αÑç αñÜαñ▓αÑçαñéαÑñ',
+    'bump': 'αñºαÑÇαñ░αÑç αñÜαñ▓αÑçαñéαÑñ',
+    'barricade': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
+    'barrier': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
+    'construction': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
+    'cone': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
+    'door': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
+    'openeddoor': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
+    'cabinetdoor': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
+    'refrigeratordoor': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
+    'chair': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
+    'table': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
+    'cabinet': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
+    'couch': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
+    'pole': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
+    'electricpole': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
+    'powerpole': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
+    'streetlight': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
+    'vehiclehazard': 'αñ¼αñ╛αñêαñé αñôαñ░ αñ░αñ╣αÑçαñéαÑñ',
+    'humannearby': 'αñºαÑÇαñ░αÑç αñÜαñ▓αÑçαñéαÑñ',
+    'animalhazard': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
+    'roadhazard': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
+    'roadsideobstacle': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
   };
 
   static const Map<DeviceOrientation, int> _deviceRotation = {
@@ -546,6 +555,7 @@ class _HomeScreenState extends State<HomeScreen>
 
     _voiceAssistant = VoiceAssistantService(enableSpeech: true);
     _geminiService = GeminiService();
+    _personRecognitionService = PersonRecognitionService();
     unawaited(_voiceAssistant.initialize(localeId: 'en_IN'));
     _yoloDetector = YoloDetectorService(
       modelAsset: YOLO_MODEL_ASSET,
@@ -600,6 +610,7 @@ class _HomeScreenState extends State<HomeScreen>
     unawaited(_yoloDetector.dispose());
     unawaited(_indoorDetector.dispose());
     unawaited(_signboardDetector.dispose());
+    _personRecognitionService.dispose();
     super.dispose();
   }
 
@@ -1497,20 +1508,20 @@ class _HomeScreenState extends State<HomeScreen>
       } else {
         final distanceText = fallback.distanceMeters == null
             ? ''
-            : ' • ${fallback.distanceMeters!.toStringAsFixed(1)}m';
+            : ' ΓÇó ${fallback.distanceMeters!.toStringAsFixed(1)}m';
         roadTitle = 'Road detected';
         roadBody =
-            '${fallback.label}$distanceText • ${(fallback.score * 100).toStringAsFixed(1)}%';
+            '${fallback.label}$distanceText ΓÇó ${(fallback.score * 100).toStringAsFixed(1)}%';
         roadAccentColor = const Color(0xFF9FB0C7);
       }
     } else {
       final top = roadAlerts.first;
       final distanceText = top.distanceMeters == null
           ? ''
-          : ' • ${top.distanceMeters!.toStringAsFixed(1)}m';
+          : ' ΓÇó ${top.distanceMeters!.toStringAsFixed(1)}m';
       roadTitle = 'Road alert';
       roadBody =
-          '${top.label} • ${top.proximity}$distanceText • ${(top.score * 100).toStringAsFixed(1)}%';
+          '${top.label} ΓÇó ${top.proximity}$distanceText ΓÇó ${(top.score * 100).toStringAsFixed(1)}%';
       roadAccentColor = const Color(0xFFB6F3C2);
     }
 
@@ -1535,20 +1546,20 @@ class _HomeScreenState extends State<HomeScreen>
       } else {
         final distanceText = fallback.distanceMeters == null
             ? ''
-            : ' • ${fallback.distanceMeters!.toStringAsFixed(1)}m';
+            : ' ΓÇó ${fallback.distanceMeters!.toStringAsFixed(1)}m';
         indoorTitle = 'Indoor detected';
         indoorBody =
-            '${fallback.label}$distanceText • ${(fallback.score * 100).toStringAsFixed(1)}%';
+            '${fallback.label}$distanceText ΓÇó ${(fallback.score * 100).toStringAsFixed(1)}%';
         indoorAccentColor = const Color(0xFF9FB0C7);
       }
     } else {
       final top = indoorAlerts.first;
       final distanceText = top.distanceMeters == null
           ? ''
-          : ' • ${top.distanceMeters!.toStringAsFixed(1)}m';
+          : ' ΓÇó ${top.distanceMeters!.toStringAsFixed(1)}m';
       indoorTitle = 'Indoor alert';
       indoorBody =
-          '${top.label} • ${top.proximity}$distanceText • ${(top.score * 100).toStringAsFixed(1)}%';
+          '${top.label} ΓÇó ${top.proximity}$distanceText ΓÇó ${(top.score * 100).toStringAsFixed(1)}%';
       indoorAccentColor = const Color(0xFFB6F3C2);
     }
 
@@ -2013,7 +2024,7 @@ class _HomeScreenState extends State<HomeScreen>
     if (_selectedLanguage == 'Hindi') {
       final hindiDirection = _hindiDirection(direction);
       final hindiDistance = _hindiDistanceDescriptor(detection, direction);
-      return 'साइनबोर्ड: $text, $hindiDistance $hindiDirection है।';
+      return 'αñ╕αñ╛αñçαñ¿αñ¼αÑïαñ░αÑìαñí: $text, $hindiDistance $hindiDirection αñ╣αÑêαÑñ';
     }
     return 'Signboard: $text, $distanceWord $directionPhrase.';
   }
@@ -2166,7 +2177,7 @@ class _HomeScreenState extends State<HomeScreen>
     final distanceWord = _hindiDistanceDescriptor(detection, direction);
     final directionPhrase = _hindiDirection(direction);
     final guidance = _hindiGuidance[normalized];
-    final base = '$label $distanceWord $directionPhrase है।';
+    final base = '$label $distanceWord $directionPhrase αñ╣αÑêαÑñ';
     if (guidance == null) return base;
     return '$base $guidance';
   }
@@ -2174,11 +2185,11 @@ class _HomeScreenState extends State<HomeScreen>
   String _hindiDirection(String direction) {
     switch (direction) {
       case 'left':
-        return 'बाईं ओर';
+        return 'αñ¼αñ╛αñêαñé αñôαñ░';
       case 'right':
-        return 'दाईं ओर';
+        return 'αñªαñ╛αñêαñé αñôαñ░';
       default:
-        return 'सामने';
+        return 'αñ╕αñ╛αñ«αñ¿αÑç';
     }
   }
 
@@ -2189,31 +2200,31 @@ class _HomeScreenState extends State<HomeScreen>
     String word;
     if (distance != null) {
       if (distance <= buckets[0]) {
-        word = 'बहुत पास';
+        word = 'αñ¼αñ╣αÑüαññ αñ¬αñ╛αñ╕';
       } else if (distance <= buckets[1]) {
-        word = 'पास';
+        word = 'αñ¬αñ╛αñ╕';
       } else if (distance <= buckets[2]) {
-        word = 'आगे';
+        word = 'αñåαñùαÑç';
       } else {
-        word = 'दूर';
+        word = 'αñªαÑéαñ░';
       }
     } else {
       switch (detection.proximity) {
         case 'urgent':
-          word = 'बहुत पास';
+          word = 'αñ¼αñ╣αÑüαññ αñ¬αñ╛αñ╕';
           break;
         case 'near':
-          word = 'पास';
+          word = 'αñ¬αñ╛αñ╕';
           break;
         case 'mid':
-          word = 'आगे';
+          word = 'αñåαñùαÑç';
           break;
         default:
-          word = 'दूर';
+          word = 'αñªαÑéαñ░';
       }
     }
-    if (direction != 'ahead' && word == 'आगे') {
-      word = 'पास';
+    if (direction != 'ahead' && word == 'αñåαñùαÑç') {
+      word = 'αñ¬αñ╛αñ╕';
     }
     return word;
   }
@@ -2930,7 +2941,7 @@ class _HomeScreenState extends State<HomeScreen>
     final now = DateTime.now();
 
     // --- Fast OCR-only path (no cooldown restriction, no API key needed) ---
-    // Use raw OCR text for intent matching — don't over-filter it.
+    // Use raw OCR text for intent matching ΓÇö don't over-filter it.
     // Prefer the most recent OCR text captured (signboard-cropped or full frame).
     final fullOcr = ocrText.trim();
     final bestOcr = _lastIntentOcrText.trim().isNotEmpty ? _lastIntentOcrText.trim() : fullOcr;
@@ -3385,7 +3396,7 @@ class _HomeScreenState extends State<HomeScreen>
     if (item.currency == r'$') {
       return '\$$value';
     }
-    if (item.currency == '₹') {
+    if (item.currency == 'Γé╣') {
       return '$value rupees';
     }
     return value;
@@ -3394,7 +3405,7 @@ class _HomeScreenState extends State<HomeScreen>
   List<_MenuItem> _parseMenuItems(String ocrText) {
     final lines = ocrText.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).toList();
     final items = <_MenuItem>[];
-    final priceRegex = RegExp(r'((?:₹|rs\\.?|inr|\\$)\\s*)?(\\d+(?:[.,]\\d{2})?)', caseSensitive: false);
+    final priceRegex = RegExp(r'((?:Γé╣|rs\\.?|inr|\\$)\\s*)?(\\d+(?:[.,]\\d{2})?)', caseSensitive: false);
     final defaultCurrency = _detectCurrency(ocrText);
     String? pendingName;
     for (final line in lines) {
@@ -3426,7 +3437,7 @@ class _HomeScreenState extends State<HomeScreen>
     final lower = text.toLowerCase();
     if (lower.contains(r'$')) return r'$';
     if (lower.contains('?') || lower.contains('rs') || lower.contains('inr')) {
-      return '₹';
+      return 'Γé╣';
     }
     return '';
   }
@@ -3435,7 +3446,7 @@ class _HomeScreenState extends State<HomeScreen>
     final lower = token.toLowerCase();
     if (lower.contains(r'$')) return r'$';
     if (lower.contains('?') || lower.contains('rs') || lower.contains('inr')) {
-      return '₹';
+      return 'Γé╣';
     }
     return fallback;
   }

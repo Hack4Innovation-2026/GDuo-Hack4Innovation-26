@@ -1,16 +1,40 @@
 # DrishtiAI
 
-A new Flutter project.
+DrishtiAI is a Flutter assistive application with on-device scene understanding and a FastAPI person-recognition backend.
 
-## Getting Started
+## Flutter app
 
-This project is a starting point for a Flutter application.
-~~~~
-A few resources to get you started if this is your first Flutter project:
+```bash
+flutter pub get
+flutter run
+```
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+Optional runtime configuration goes in `.env`:
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+```bash
+cp .env.example .env
+```
+
+`PERSON_RECOGNITION_API_BASE_URL` should point to the FastAPI backend. For Android emulators, `http://10.0.2.2:8000` is the usual local mapping.
+
+## Person Recognition Backend
+
+The backend implements:
+
+- YOLOv8n person detection
+- distance filtering using person bounding-box height
+- MediaPipe face detection
+- DeepFace Facenet embeddings
+- local embedding database for fast matching
+- optional Google Cloud Storage uploads for registered faces
+
+Start it with:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r backend/requirements.txt
+uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+More backend details are in [backend/README.md](backend/README.md).
