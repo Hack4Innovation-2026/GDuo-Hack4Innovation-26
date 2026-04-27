@@ -295,8 +295,8 @@ or
 
       lastResponse = response;
       if (response.statusCode == 200) return response;
-      // For non-model-not-found errors, return immediately.
-      if (response.statusCode != 404) return response;
+      // 404 = model not found, 403 = model not accessible/preview-only — try next.
+      if (response.statusCode != 404 && response.statusCode != 403) return response;
     }
 
     if (lastResponse != null) return lastResponse;

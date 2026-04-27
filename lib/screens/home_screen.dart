@@ -111,7 +111,6 @@ class _HomeScreenState extends State<HomeScreen>
   bool _personRecognitionInFlight = false;
   bool _latestSmartEmpty = false;
   String _latestPersonMessage = '';
-  String? _personRecognitionError;
   DateTime _lastPersonRecognitionTime = DateTime.fromMillisecondsSinceEpoch(0);
   Uint8List? _latestRegistrationFrame;
   DateTime _latestRegistrationFrameAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -192,15 +191,15 @@ class _HomeScreenState extends State<HomeScreen>
   static const int _yoloFrameStride = 5;
   static const int _indoorFrameStride = 6;
   static const int _indoorFrameOffset = 2;
-  static const Duration _signboardInterval = Duration(milliseconds: 350);
-  static const int _signboardFrameStride = 2;
+  static const Duration _signboardInterval = Duration(milliseconds: 500);
+  static const int _signboardFrameStride = 3;
   static const int _signboardFrameOffset = 1;
   static const Duration _signboardSpeakCooldown = Duration(seconds: 6);
   static const Duration _signboardLandmarkHold = Duration(seconds: 2);
   static const double _signboardLandmarkSmoothing = 0.6;
   int _frameIndex = 0;
   static const double _roadMinConfidence = 0.45;
-  static const double _indoorMinConfidence = 0.5;
+  static const double _indoorMinConfidence = 0.42;
   static const double _roadIndoorContextMinConfidence = 0.8;
   static const double _roadNoContextMinConfidence = 0.75;
   static const double _hazardSpeakDistanceMeters = 5.0;
@@ -428,26 +427,28 @@ class _HomeScreenState extends State<HomeScreen>
     'refrigeratordoor': 0.6,
     'window': 0.6,
     'cabinet': 0.6,
-    'chair': 0.55,
-    'table': 0.55,
-    'couch': 0.55,
-    'pole': 0.6,
+    'chair': 0.48,
+    'table': 0.48,
+    'couch': 0.48,
+    'pole': 0.55,
+    'stair': 0.48,
+    'stairs': 0.48,
   };
 
   static const Map<String, double> _roadMinConfidenceByLabel = {
-    'vehiclehazard': 0.6,
-    'humannearby': 0.55,
-    'animalhazard': 0.55,
+    'vehiclehazard': 0.78,
+    'humannearby': 0.60,
+    'animalhazard': 0.60,
     'roadhazard': 0.65,
-    'roadsideobstacle': 0.55,
+    'roadsideobstacle': 0.60,
   };
 
   static const Map<String, double> _roadMinAreaRatio = {
-    'vehiclehazard': 0.015,
-    'humannearby': 0.012,
-    'animalhazard': 0.01,
-    'roadhazard': 0.015,
-    'roadsideobstacle': 0.012,
+    'vehiclehazard': 0.04,
+    'humannearby': 0.020,
+    'animalhazard': 0.015,
+    'roadhazard': 0.020,
+    'roadsideobstacle': 0.018,
   };
 
   static const Map<String, double> _indoorMinAspectRatio = {
@@ -572,7 +573,7 @@ class _HomeScreenState extends State<HomeScreen>
     _signboardDetector = YoloDetectorService(
       modelAsset: SIGNBOARD_YOLO_MODEL_ASSET,
       labelsAsset: SIGNBOARD_LABELS_ASSET,
-      inputSize: 640,
+      inputSize: 320,
     );
     unawaited(_initializeSignboardYolo());
 
@@ -637,6 +638,7 @@ class _HomeScreenState extends State<HomeScreen>
             _buildDetectionOverlay(),
             _buildTopRightSettings(),
             _buildTopRightEmergencyCall(),
+            _buildBottomRightDatabase(),
             _buildBottomRightIntent(),
             _buildBottomRightConversation(),
             _buildBottomRightSOS(),
@@ -1048,7 +1050,203 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 
+  Widget _buildBottomRightDatabase() {
+    if (_currentState != HomeState.scanning) {
+      return const SizedBox.shrink();
+    }
+    final isConfigured = _personRecognitionService.isConfigured;
+    return Positioned(
+      bottom: 216,
+      right: 28,
+      child: InkWell(
+        onTap: isConfigured ? _showRegisterPersonDialog : _showPersonBackendNotConfigured,
+        borderRadius: BorderRadius.circular(24),
+        child: Container(
+          width: 48,
+          height: 48,
+          decoration: BoxDecoration(
+            color: _personRegistrationInFlight
+                ? const Color(0xFF9B59B6)
+                : Colors.white,
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: isConfigured
+                  ? const Color(0xFF9B59B6)
+                  : const Color(0xFFCCCCCC),
+              width: 2,
+            ),
+            boxShadow: const [
+              BoxShadow(color: Colors.black26, blurRadius: 6, offset: Offset(0, 3)),
+            ],
+          ),
+          child: _personRegistrationInFlight
+              ? const Center(
+                  child: SizedBox(
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2.5,
+                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                    ),
+                  ),
+                )
+              : Icon(
+                  Icons.person_add_rounded,
+                  color: isConfigured
+                      ? const Color(0xFF9B59B6)
+                      : const Color(0xFFAAAAAA),
+                  size: 26,
+                ),
+        ),
+      ),
+    );
+  }
+
+  void _showPersonBackendNotConfigured() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text(
+          'Person recognition backend not configured.\nSet PERSON_RECOGNITION_API_BASE_URL in .env',
+        ),
+        duration: Duration(seconds: 4),
+        backgroundColor: Color(0xFF333333),
+      ),
+    );
+  }
+
+  Future<void> _showRegisterPersonDialog() async {
+    if (!mounted) return;
+    final nameController = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E2E),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            const Icon(Icons.person_add_rounded, color: Color(0xFF9B59B6), size: 24),
+            const SizedBox(width: 10),
+            Text(
+              'Register Person',
+              style: GoogleFonts.outfit(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Point camera at the person\'s face, then enter their name.',
+              style: GoogleFonts.outfit(color: const Color(0xFFB0B0C0), fontSize: 14),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: nameController,
+              autofocus: true,
+              textCapitalization: TextCapitalization.words,
+              style: GoogleFonts.outfit(color: Colors.white),
+              decoration: InputDecoration(
+                hintText: 'Person\'s name',
+                hintStyle: GoogleFonts.outfit(color: const Color(0xFF666680)),
+                filled: true,
+                fillColor: const Color(0xFF2A2A3E),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: BorderSide.none,
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: const BorderSide(color: Color(0xFF9B59B6), width: 2),
+                ),
+                prefixIcon: const Icon(Icons.badge_rounded, color: Color(0xFF9B59B6)),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text(
+              'Cancel',
+              style: GoogleFonts.outfit(color: const Color(0xFF888898)),
+            ),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              final name = nameController.text.trim();
+              if (name.isNotEmpty) Navigator.of(ctx).pop(true);
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF9B59B6),
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+            child: Text('Register', style: GoogleFonts.outfit(fontWeight: FontWeight.w600)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+    final name = nameController.text.trim();
+    if (name.isEmpty) return;
+
+    // Capture current frame for registration.
+    final frame = _latestRegistrationFrame;
+    if (frame == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No camera frame available. Please wait a moment and try again.'),
+          backgroundColor: Color(0xFF333333),
+        ),
+      );
+      return;
+    }
+
+    setState(() => _personRegistrationInFlight = true);
+    try {
+      final result = await _personRecognitionService.registerPerson(
+        name: name,
+        jpegBytes: frame,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            result.success
+                ? '✓ ${result.name} registered (${result.recordsForPerson} photos)'
+                : 'Registration failed: ${result.message}',
+          ),
+          backgroundColor: result.success
+              ? const Color(0xFF27AE60)
+              : const Color(0xFFCC0000),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Registration error: ${e.toString()}'),
+          backgroundColor: const Color(0xFFCC0000),
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _personRegistrationInFlight = false);
+    }
+  }
+
   Future<void> _startOcrPipeline() async {
+
     setState(() {
       _cameraError = null;
       _currentState = HomeState.scanning;
@@ -1594,6 +1792,11 @@ class _HomeScreenState extends State<HomeScreen>
     final isIndoor = identical(allowedLabels, _indoorAlertLabels);
     final now = DateTime.now();
     final hasRoadContext = now.isBefore(_roadContextUntil);
+    final hasIndoorContext = now.isBefore(_indoorContextUntil);
+
+    // Completely suppress road alerts when indoor context is active.
+    if (!isIndoor && hasIndoorContext) return const [];
+
     final alerts = detections.where((d) {
       final normalized = _normalizeLabelForAlert(d.label);
       final minConfidence = isIndoor
@@ -1605,16 +1808,11 @@ class _HomeScreenState extends State<HomeScreen>
         final minArea = _indoorMinAreaRatio[normalized];
         if (minArea != null && d.areaRatio < minArea) return false;
         if (!_passesAspectRatioForLabel(normalized, d.rect)) return false;
+        // Allow first indoor detection through even without context (fix chicken-and-egg).
       } else {
         final minArea = _roadMinAreaRatio[normalized];
         if (minArea != null && d.areaRatio < minArea) return false;
-        if (!hasRoadContext) {
-          return false;
-        }
-      }
-      if (!isIndoor && now.isBefore(_indoorContextUntil)) {
-        if (d.score < _roadIndoorContextMinConfidence) return false;
-        return false;
+        if (!hasRoadContext) return false;
       }
       if (d.distanceMeters != null) {
         return d.distanceMeters! <= _hazardSpeakDistanceMeters;
@@ -1625,6 +1823,7 @@ class _HomeScreenState extends State<HomeScreen>
       alerts,
       isIndoor ? _indoorHistory : _roadHistory,
     );
+    // Establish indoor context as soon as stable alerts arrive.
     if (isIndoor && stableAlerts.isNotEmpty) {
       _indoorContextUntil = now.add(_indoorContextHold);
     }
@@ -2300,6 +2499,16 @@ class _HomeScreenState extends State<HomeScreen>
     _lastAnalysisTime = now;
     _lastFrameSize = Size(image.width.toDouble(), image.height.toDouble());
     _frameIndex++;
+
+    // Periodically capture a JPEG frame for person registration.
+    if (now.difference(_latestRegistrationFrameAt) >= const Duration(milliseconds: 1200)) {
+      final jpeg = _buildGeminiImage(image);
+      if (jpeg != null) {
+        _latestRegistrationFrame = jpeg;
+        _latestRegistrationFrameAt = now;
+      }
+    }
+
     try {
       final inputImage = _inputImageFromCameraImage(image);
       if (inputImage == null) return;
