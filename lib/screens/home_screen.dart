@@ -573,7 +573,7 @@ class _HomeScreenState extends State<HomeScreen>
     _signboardDetector = YoloDetectorService(
       modelAsset: SIGNBOARD_YOLO_MODEL_ASSET,
       labelsAsset: SIGNBOARD_LABELS_ASSET,
-      inputSize: 320,
+      inputSize: 640,
     );
     unawaited(_initializeSignboardYolo());
 
