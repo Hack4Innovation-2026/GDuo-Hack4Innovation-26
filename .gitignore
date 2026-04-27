@@ -1,0 +1,134 @@
+# =========================
+# OS / System files
+# =========================
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# =========================
+# Logs
+# =========================
+*.log
+logs/
+runs/
+wandb/
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+
+# Virtual environments (IMPORTANT 🚨)
+.venv/
+venv/
+env/
+ENV/
+
+# Python tooling
+.pytest_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+
+# =========================
+# Environment / Secrets
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# Flutter / Dart
+# =========================
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub/
+.pub-cache/
+/build/
+
+# Flutter generated
+**/ios/Flutter/.last_build_id
+
+# Android build
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# =========================
+# IDEs
+# =========================
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# VS Code (optional – uncomment if needed)
+#.vscode/
+
+# =========================
+# Swift / iOS
+# =========================
+.build/
+.swiftpm/
+
+# =========================
+# General build artifacts
+# =========================
+build/
+dist/
+out/
+target/
+
+# =========================
+# Machine Learning / AI
+# =========================
+
+# Models
+*.pt
+*.pth
+*.h5
+*.hdf5
+*.tflite
+*.onnx
+*.pb
+
+# Compiled libs (these broke your push 🚨)
+*.so
+*.dylib
+*.dll
+
+# Large datasets
+datasets/
+data/
+DrishtiAI_Raw/
+*_tmp/
+*.zip
+*.tar
+*.gz
+*.7z
+*.rar
+
+# Specific large JSON (optional but safe)
+*.json
+
+# =========================
+# Backend specific
+# =========================
+backend/.venv/
+backend/venv/
+
+# =========================
+# Misc
+# =========================
+.history
+.svn/
+.atom/
+migrate_working_dir/
