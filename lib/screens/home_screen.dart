@@ -142,6 +142,9 @@ class _HomeScreenState extends State<HomeScreen>
   DateTime _signboardLandmarkAt = DateTime.fromMillisecondsSinceEpoch(0);
   int _signboardLandmarkStreak = 0;
   YoloDetection? _lastSignboardDetection;
+  Uint8List? _latestRegistrationFrame;
+  DateTime _latestRegistrationFrameAt = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _personRegistrationInFlight = false;
 
   static const Duration _analysisInterval = Duration(milliseconds: 400);
   static const Duration _emitCooldown = Duration(milliseconds: 1500);
@@ -223,6 +226,8 @@ class _HomeScreenState extends State<HomeScreen>
   static const int _signboardFrameOffset = 1;
   static const Duration _signboardSpeakCooldown = Duration(seconds: 6);
   static const Duration _signboardLandmarkHold = Duration(seconds: 2);
+  static const Duration _registrationFrameRefresh = Duration(milliseconds: 1200);
+  static const Duration _registrationFrameMaxAge = Duration(seconds: 5);
   static const double _signboardLandmarkSmoothing = 0.6;
   int _frameIndex = 0;
   static const double _roadMinConfidence = 0.45;
@@ -661,6 +666,7 @@ class _HomeScreenState extends State<HomeScreen>
           children: [
             _buildMainContent(),
             _buildDetectionOverlay(),
+            _buildBottomLeftAddPerson(),
             _buildTopRightSettings(),
             _buildTopRightEmergencyCall(),
             _buildBottomRightIntent(),
@@ -1039,6 +1045,55 @@ class _HomeScreenState extends State<HomeScreen>
           ),
           child: const Center(
             child: Icon(Icons.emergency_rounded, color: Colors.white, size: 36),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBottomLeftAddPerson() {
+    if (_currentState != HomeState.scanning) {
+      return const SizedBox.shrink();
+    }
+    return Positioned(
+      bottom: 24,
+      left: 24,
+      child: InkWell(
+        onTap: _personRegistrationInFlight ? null : _showRegisterPersonSheet,
+        borderRadius: BorderRadius.circular(32),
+        child: Container(
+          width: 64,
+          height: 64,
+          decoration: BoxDecoration(
+            color:
+                _personRegistrationInFlight
+                    ? const Color(0xFF8FB3FF)
+                    : const Color(0xFF1A56DB),
+            shape: BoxShape.circle,
+            boxShadow: const [
+              BoxShadow(
+                color: Colors.black26,
+                blurRadius: 8,
+                offset: Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Center(
+            child:
+                _personRegistrationInFlight
+                    ? const SizedBox(
+                      width: 28,
+                      height: 28,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2.6,
+                        valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                      ),
+                    )
+                    : const Icon(
+                      Icons.person_add_alt_1_rounded,
+                      color: Colors.white,
+                      size: 34,
+                    ),
           ),
         ),
       ),
@@ -2529,8 +2584,19 @@ class _HomeScreenState extends State<HomeScreen>
           !_personRecognitionInFlight &&
           now.difference(_lastPersonRecognitionTime) >=
               _personRecognitionInterval;
+      final bool shouldRefreshRegistrationFrame =
+          now.difference(_latestRegistrationFrameAt) >=
+          _registrationFrameRefresh;
+      Uint8List? backendJpeg;
+      if (shouldRunPersonRecognition || shouldRefreshRegistrationFrame) {
+        backendJpeg = _buildGeminiImage(image);
+        if (backendJpeg != null && shouldRefreshRegistrationFrame) {
+          _latestRegistrationFrame = backendJpeg;
+          _latestRegistrationFrameAt = now;
+        }
+      }
       if (shouldRunPersonRecognition) {
-        final personImage = _buildGeminiImage(image);
+        final personImage = backendJpeg;
         if (personImage != null) {
           _personRecognitionInFlight = true;
           _lastPersonRecognitionTime = now;
@@ -3478,6 +3544,178 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
+  Future<void> _showRegisterPersonSheet() async {
+    if (!_personRecognitionService.isConfigured) {
+      _showMessage('Person registration backend is not configured yet.');
+      return;
+    }
+    if (_currentState != HomeState.scanning) {
+      _showMessage('Start the camera first to register a person.');
+      return;
+    }
+    final frame = _latestRegistrationFrame;
+    final frameAge = DateTime.now().difference(_latestRegistrationFrameAt);
+    if (frame == null || frameAge > _registrationFrameMaxAge) {
+      _showMessage('Please keep the person in front of the camera and try again.');
+      return;
+    }
+
+    final nameController = TextEditingController();
+    bool isSubmitting = false;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (bottomSheetContext) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            Future<void> submit() async {
+              final name = nameController.text.trim();
+              if (name.isEmpty) {
+                _showMessage('Enter the person\'s name before saving.');
+                return;
+              }
+              final navigator = Navigator.of(bottomSheetContext);
+              setModalState(() => isSubmitting = true);
+              if (mounted) {
+                setState(() => _personRegistrationInFlight = true);
+              }
+              try {
+                final result = await _personRecognitionService.registerPerson(
+                  name: name,
+                  jpegBytes: frame,
+                );
+                if (!mounted || !navigator.mounted) return;
+                navigator.pop();
+                _showMessage(result.message);
+                if (_soundEnabled) {
+                  await _voiceAssistant.stop();
+                  await _voiceAssistant.speak(
+                    '${result.name} saved successfully.',
+                  );
+                }
+              } catch (error) {
+                if (!mounted) return;
+                setModalState(() => isSubmitting = false);
+                _showMessage(error.toString().replaceFirst('Exception: ', ''));
+              } finally {
+                if (mounted) {
+                  setState(() => _personRegistrationInFlight = false);
+                }
+              }
+            }
+
+            return Padding(
+              padding: EdgeInsets.only(
+                left: 24,
+                right: 24,
+                top: 24,
+                bottom: MediaQuery.of(context).viewInsets.bottom + 24,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        'Add Person',
+                        style: GoogleFonts.outfit(
+                          fontSize: 28,
+                          fontWeight: FontWeight.bold,
+                          color: const Color(0xFF1A1A1A),
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close, size: 30),
+                        color: const Color(0xFF1A1A1A),
+                        onPressed:
+                            isSubmitting
+                                ? null
+                                : () => Navigator.of(bottomSheetContext).pop(),
+                        constraints: const BoxConstraints(
+                          minWidth: 48,
+                          minHeight: 48,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    'The current camera frame will be saved as this person\'s reference photo.',
+                    style: GoogleFonts.outfit(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w500,
+                      color: const Color(0xFF4A4A4A),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(18),
+                    child: AspectRatio(
+                      aspectRatio: 1,
+                      child: Image.memory(
+                        frame,
+                        fit: BoxFit.cover,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  TextFormField(
+                    controller: nameController,
+                    textCapitalization: TextCapitalization.words,
+                    enabled: !isSubmitting,
+                    decoration: const InputDecoration(
+                      labelText: 'Person Name',
+                      hintText: 'e.g. Manasi',
+                    ),
+                    style: const TextStyle(
+                      fontSize: 18,
+                      color: Color(0xFF1A1A1A),
+                    ),
+                    onFieldSubmitted: (_) {
+                      if (!isSubmitting) {
+                        unawaited(submit());
+                      }
+                    },
+                  ),
+                  const SizedBox(height: 18),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: isSubmitting ? null : submit,
+                      icon:
+                          isSubmitting
+                              ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2.2,
+                                  valueColor: AlwaysStoppedAnimation<Color>(
+                                    Colors.white,
+                                  ),
+                                ),
+                              )
+                              : const Icon(Icons.cloud_upload_rounded),
+                      label: Text(
+                        isSubmitting ? 'Saving...' : 'Save Person',
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          },
+        );
+      },
+    );
+    nameController.dispose();
+  }
+
   Uint8List? _buildGeminiImage(CameraImage image) {
     if (Platform.isIOS && image.format.group == ImageFormatGroup.bgra8888) {
       return _buildJpegFromBgra(image);
@@ -4191,5 +4429,13 @@ class _HomeScreenState extends State<HomeScreen>
         );
       },
     );
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    messenger
+      ?..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 }

@@ -88,9 +88,10 @@ class PersonRecognitionService {
         'language': _normalizeLanguage(language),
       }),
     );
-    if (response.statusCode != 200) {
-      throw Exception('Person recognition HTTP ${response.statusCode}');
-    }
+    _throwIfNotOk(
+      response,
+      fallbackMessage: 'Person recognition HTTP ${response.statusCode}',
+    );
     final decoded = jsonDecode(response.body) as Map<String, dynamic>;
     return PersonRecognitionResult.fromJson(decoded);
   }
@@ -110,9 +111,10 @@ class PersonRecognitionService {
         'image_base64': base64Encode(jpegBytes),
       }),
     );
-    if (response.statusCode != 200) {
-      throw Exception('Person registration HTTP ${response.statusCode}');
-    }
+    _throwIfNotOk(
+      response,
+      fallbackMessage: 'Person registration HTTP ${response.statusCode}',
+    );
     final decoded = jsonDecode(response.body) as Map<String, dynamic>;
     return PersonRegistrationResult.fromJson(decoded);
   }
@@ -158,5 +160,26 @@ class PersonRecognitionService {
     if (normalized.startsWith('YOUR_')) return false;
     if (normalized.contains('PLACEHOLDER')) return false;
     return true;
+  }
+
+  static void _throwIfNotOk(
+    http.Response response, {
+    required String fallbackMessage,
+  }) {
+    if (response.statusCode == 200) return;
+    try {
+      final decoded = jsonDecode(response.body);
+      if (decoded is Map<String, dynamic>) {
+        final detail = decoded['detail']?.toString().trim();
+        final message = decoded['message']?.toString().trim();
+        final error = detail?.isNotEmpty == true ? detail! : message;
+        if (error != null && error.isNotEmpty) {
+          throw Exception(error);
+        }
+      }
+    } catch (_) {
+      // Fall through to the generic message if the backend body isn't JSON.
+    }
+    throw Exception(fallbackMessage);
   }
 }
