@@ -112,6 +112,9 @@ class _HomeScreenState extends State<HomeScreen>
   bool _latestSmartEmpty = false;
   String _latestPersonMessage = '';
   DateTime _lastPersonRecognitionTime = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _geminiQuotaUntil = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastPersonSpeakTime = DateTime.fromMillisecondsSinceEpoch(0);
+  String _lastSpokenPersonName = '';
   Uint8List? _latestRegistrationFrame;
   DateTime _latestRegistrationFrameAt = DateTime.fromMillisecondsSinceEpoch(0);
   bool _personRegistrationInFlight = false;
@@ -153,7 +156,10 @@ class _HomeScreenState extends State<HomeScreen>
   static const Duration _speechCooldown = Duration(seconds: 4);
   static const Duration _alertSpeakCooldown = Duration(seconds: 4);
   static const Duration _signboardPriorityWindow = Duration(seconds: 5);
-  static const Duration _geminiCooldown = Duration(seconds: 6);
+  static const Duration _geminiCooldown = Duration(seconds: 12);
+  static const Duration _geminiQuotaBackoff = Duration(seconds: 60);
+  static const Duration _personRecognitionInterval = Duration(seconds: 3);
+  static const Duration _personSpeakCooldown = Duration(seconds: 8);
   static const Duration _conversationRearmDelay = Duration(milliseconds: 300);
   static const Duration _intentCooldown = Duration(seconds: 4);
   static const Duration _intentScanInterval = Duration(milliseconds: 900);
@@ -2572,6 +2578,18 @@ class _HomeScreenState extends State<HomeScreen>
         _signboardInFlight = true;
         _lastSignboardTime = now;
       }
+
+      // Trigger person recognition in background (non-blocking).
+      if (_personRecognitionService.isConfigured &&
+          !_personRecognitionInFlight &&
+          now.difference(_lastPersonRecognitionTime) >= _personRecognitionInterval) {
+        final jpegForPerson = _latestRegistrationFrame;
+        if (jpegForPerson != null) {
+          _personRecognitionInFlight = true;
+          _lastPersonRecognitionTime = now;
+          unawaited(_runPersonRecognition(jpegForPerson));
+        }
+      }
       bool shouldSpeakAlerts = false;
       if (shouldRunRoad || shouldRunIndoor || shouldRunSignboard) {
         final rgbImage = _buildRgbImageForYolo(image);
@@ -2901,6 +2919,8 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
     final now = DateTime.now();
+    // 429 quota backoff — skip Gemini until backoff expires.
+    if (now.isBefore(_geminiQuotaUntil)) return;
     if (now.difference(_lastGeminiCall) < _geminiCooldown) return;
 
     final filteredText = _filterOcrText(text);
@@ -2969,15 +2989,60 @@ class _HomeScreenState extends State<HomeScreen>
       }
     } catch (error) {
       debugPrint('Gemini error: $error');
+      final errStr = error.toString();
+      final isQuota = errStr.contains('429') || errStr.toLowerCase().contains('quota');
+      if (isQuota) {
+        // Back off for 60 s on quota error — use OCR text directly meanwhile.
+        _geminiQuotaUntil = DateTime.now().add(_geminiQuotaBackoff);
+      }
       if (mounted) {
         setState(() {
-          _latestGeminiError = 'Gemini error: ${error.toString()}';
+          _latestGeminiError = isQuota
+              ? 'Gemini quota exceeded. Using OCR text for 60s.'
+              : 'Gemini error: $errStr';
           _latestSmartText = '';
           _latestSmartEmpty = false;
         });
       }
     } finally {
       _geminiInFlight = false;
+    }
+  }
+
+  /// Runs person recognition on a JPEG frame and speaks the result.
+  Future<void> _runPersonRecognition(Uint8List jpegBytes) async {
+    try {
+      final language = _selectedLanguage ?? 'English';
+      final result = await _personRecognitionService.analyzeFrame(
+        jpegBytes: jpegBytes,
+        language: language,
+      );
+      if (result == null) return;
+      if (!result.shouldAnnounce) return;
+
+      final message = result.message.trim();
+      if (message.isEmpty) return;
+
+      final now = DateTime.now();
+      // Avoid repeating the same person name within the speak cooldown.
+      final sameAsBefore = result.name != null &&
+          result.name == _lastSpokenPersonName &&
+          now.difference(_lastPersonSpeakTime) < _personSpeakCooldown;
+      if (sameAsBefore) return;
+
+      _lastPersonSpeakTime = now;
+      _lastSpokenPersonName = result.name ?? '';
+
+      if (mounted) {
+        setState(() => _latestPersonMessage = message);
+      }
+      if (_soundEnabled) {
+        unawaited(_voiceAssistant.speak(message));
+      }
+    } catch (e) {
+      debugPrint('Person recognition error: $e');
+    } finally {
+      _personRecognitionInFlight = false;
     }
   }
 
