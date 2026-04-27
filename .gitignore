@@ -1,134 +1,69 @@
-# =========================
-# OS / System files
-# =========================
-.DS_Store
-Thumbs.db
-*.swp
-*.swo
-
-# =========================
-# Logs
-# =========================
+# Miscellaneous
+*.class
 *.log
-logs/
-runs/
-wandb/
-
-# =========================
-# Python
-# =========================
-__pycache__/
 *.pyc
-*.pyo
-*.pyd
-*.egg-info/
-.eggs/
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
 
-# Virtual environments (IMPORTANT 🚨)
-.venv/
-venv/
-env/
-ENV/
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
 
-# Python tooling
-.pytest_cache/
-.mypy_cache/
-.coverage
-coverage.xml
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
 
-# =========================
-# Environment / Secrets
-# =========================
-.env
-.env.*
-!.env.example
-
-# =========================
-# Flutter / Dart
-# =========================
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
 .dart_tool/
 .flutter-plugins
 .flutter-plugins-dependencies
-.packages
-.pub/
 .pub-cache/
+.pub/
 /build/
 
-# Flutter generated
-**/ios/Flutter/.last_build_id
+# Symbolication related
+app.*.symbols
 
-# Android build
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
 /android/app/debug
 /android/app/profile
 /android/app/release
 
-# =========================
-# IDEs
-# =========================
-.idea/
-*.iml
-*.ipr
-*.iws
-
-# VS Code (optional – uncomment if needed)
-#.vscode/
-
-# =========================
-# Swift / iOS
-# =========================
-.build/
-.swiftpm/
-
-# =========================
-# General build artifacts
-# =========================
-build/
-dist/
-out/
-target/
-
-# =========================
-# Machine Learning / AI
-# =========================
-
 # Models
 *.pt
 *.pth
-*.h5
-*.hdf5
-*.tflite
-*.onnx
-*.pb
 
-# Compiled libs (these broke your push 🚨)
-*.so
-*.dylib
-*.dll
-
-# Large datasets
+# Data
 datasets/
 data/
-DrishtiAI_Raw/
-*_tmp/
 *.zip
-*.tar
-*.gz
-*.7z
-*.rar
 
-# Specific large JSON (optional but safe)
-*.json
+# Python cache
+__pycache__/
+*.pyc
 
-# =========================
-# Backend specific
-# =========================
-backend/.venv/
-backend/venv/
+# Logs
+runs/
 
-# =========================
-# Misc
-# =========================
-.history
-.svn/
-.atom/
-migrate_working_dir/
+# ONNX models
+*.onnx
+
+# Environment secrets
+.env
+.env.*
+!.env.example
