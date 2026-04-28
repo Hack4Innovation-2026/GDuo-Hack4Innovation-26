@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     min_person_confidence: float = 0.35
     camera_fov_degrees: float = 60.0
     average_person_height_m: float = 1.7
-    max_person_distance_m: float = 3.5
+    max_person_distance_m: float = 5.0
     face_detection_confidence: float = 0.5
     face_match_distance_threshold: float = 0.6
     announcement_cooldown_seconds: int = 4

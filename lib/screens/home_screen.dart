@@ -113,6 +113,7 @@ class _HomeScreenState extends State<HomeScreen>
   String _latestPersonMessage = '';
   DateTime _lastPersonRecognitionTime = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _geminiQuotaUntil = DateTime.fromMillisecondsSinceEpoch(0);
+  int _geminiQuotaErrorCount = 0;
   DateTime _lastPersonSpeakTime = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastSpokenPersonName = '';
   Uint8List? _latestRegistrationFrame;
@@ -150,19 +151,20 @@ class _HomeScreenState extends State<HomeScreen>
   int _signboardLandmarkStreak = 0;
   YoloDetection? _lastSignboardDetection;
 
-  static const Duration _analysisInterval = Duration(milliseconds: 250);
-  static const Duration _ocrInterval = Duration(milliseconds: 650);
+  static const Duration _analysisInterval = Duration(milliseconds: 220);
+  static const Duration _ocrInterval = Duration(milliseconds: 520);
+  static const Duration _focusedOcrInterval = Duration(milliseconds: 320);
   static const Duration _emitCooldown = Duration(milliseconds: 1500);
   static const Duration _speechCooldown = Duration(seconds: 4);
   static const Duration _alertSpeakCooldown = Duration(seconds: 4);
   static const Duration _signboardPriorityWindow = Duration(seconds: 5);
   static const Duration _geminiCooldown = Duration(seconds: 12);
-  static const Duration _geminiQuotaBackoff = Duration(seconds: 60);
-  static const Duration _personRecognitionInterval = Duration(seconds: 3);
+  static const Duration _geminiMaxQuotaBackoff = Duration(minutes: 10);
+  static const Duration _personRecognitionInterval = Duration(seconds: 2);
   static const Duration _personSpeakCooldown = Duration(seconds: 8);
   static const Duration _conversationRearmDelay = Duration(milliseconds: 300);
   static const Duration _intentCooldown = Duration(seconds: 4);
-  static const Duration _intentScanInterval = Duration(milliseconds: 900);
+  static const Duration _intentScanInterval = Duration(milliseconds: 1500);
   static const Duration _intentMapsLaunchCooldown = Duration(seconds: 8);
   static const Duration _callPromptCooldown = Duration(seconds: 20);
   static const Map<String, String> _intentCategoryNames = {
@@ -182,7 +184,7 @@ class _HomeScreenState extends State<HomeScreen>
   static const Map<String, List<String>> _intentKeywordHints = {
     'medical': ['medical', 'pharmacy', 'chemist', 'drug', 'drugs', 'medicine', 'pharma'],
     'hospital': ['hospital', 'clinic', 'emergency', 'er', 'casualty'],
-    'restaurant': ['restaurant', 'cafe', 'caf├⌐', 'dhaba', 'eatery', 'food', 'tiffin', 'hotel'],
+    'restaurant': ['restaurant', 'cafe', 'cafeteria', 'dhaba', 'eatery', 'food', 'tiffin', 'hotel'],
     'grocery': ['grocery', 'supermarket', 'mart', 'store', 'kirana', 'provisions'],
     'bank': ['bank', 'atm', 'cash', 'finance'],
     'hotel': ['hotel', 'lodge', 'inn', 'resort', 'guest house', 'guesthouse'],
@@ -197,8 +199,8 @@ class _HomeScreenState extends State<HomeScreen>
   static const int _yoloFrameStride = 5;
   static const int _indoorFrameStride = 6;
   static const int _indoorFrameOffset = 2;
-  static const Duration _signboardInterval = Duration(milliseconds: 500);
-  static const int _signboardFrameStride = 3;
+  static const Duration _signboardInterval = Duration(milliseconds: 320);
+  static const int _signboardFrameStride = 2;
   static const int _signboardFrameOffset = 1;
   static const Duration _signboardSpeakCooldown = Duration(seconds: 6);
   static const Duration _signboardLandmarkHold = Duration(seconds: 2);
@@ -464,86 +466,8 @@ class _HomeScreenState extends State<HomeScreen>
     'refrigeratordoor': 1.2,
   };
 
-  static const Map<String, String> _hindiLabels = {
-    'vehicle': 'αñ╡αñ╛αñ╣αñ¿',
-    'living': 'αñ╡αÑìαñ»αñòαÑìαññαñ┐',
-    'roadside': 'αñ░αÑïαñíαñ╕αñ╛αñçαñí αñ╡αñ╕αÑìαññαÑü',
-    'non_drivable': 'αñàαñ╕αÑüαñ░αñòαÑìαñ╖αñ┐αññ αñ╕αññαñ╣',
-    'drivable': 'αñ╕αñíαñ╝αñò',
-    'far': 'αñªαÑéαñ░ αñòαÑìαñ╖αÑçαññαÑìαñ░',
-    'sky': 'αñåαñ╕αñ«αñ╛αñ¿',
-    'car': 'αñòαñ╛αñ░',
-    'truck': 'αñƒαÑìαñ░αñò',
-    'bus': 'αñ¼αñ╕',
-    'motorcycle': 'αñ«αÑïαñƒαñ░αñ╕αñ╛αñçαñòαñ┐αñ▓',
-    'bicycle': 'αñ╕αñ╛αñçαñòαñ┐αñ▓',
-    'scooter': 'αñ╕αÑìαñòαÑéαñƒαñ░',
-    'autorickshaw': 'αñæαñƒαÑï',
-    'rickshaw': 'αñ░αñ┐αñòαÑìαñ╢αñ╛',
-    'pothole': 'αñùαñíαÑìαñóαñ╛',
-    'speedbump': 'αñ╕αÑìαñ¬αÑÇαñí αñ¼αÑìαñ░αÑçαñòαñ░',
-    'bump': 'αñ╕αÑìαñ¬αÑÇαñí αñ¼αÑìαñ░αÑçαñòαñ░',
-    'barricade': 'αñ¼αÑêαñ░αñ┐αñòαÑçαñí',
-    'barrier': 'αñ¼αÑêαñ░αñ┐αñ»αñ░',
-    'construction': 'αñ¿αñ┐αñ░αÑìαñ«αñ╛αñú αñòαÑìαñ╖αÑçαññαÑìαñ░',
-    'cone': 'αñòαÑïαñ¿',
-    'electricpole': 'αñ¼αñ┐αñ£αñ▓αÑÇ αñòαñ╛ αñûαñéαñ¡αñ╛',
-    'powerpole': 'αñ¼αñ┐αñ£αñ▓αÑÇ αñòαñ╛ αñûαñéαñ¡αñ╛',
-    'streetlight': 'αñ╕αÑìαñƒαÑìαñ░αÑÇαñƒ αñ▓αñ╛αñçαñƒ',
-    'door': 'αñªαñ░αñ╡αñ╛αñ£αñ╝αñ╛',
-    'openeddoor': 'αñûαÑüαñ▓αñ╛ αñªαñ░αñ╡αñ╛αñ£αñ╝αñ╛',
-    'cabinetdoor': 'αñòαÑêαñ¼αñ┐αñ¿αÑçαñƒ αñªαñ░αñ╡αñ╛αñ£αñ╝αñ╛',
-    'refrigeratordoor': 'αñ½αÑìαñ░αñ┐αñ£ αñòαñ╛ αñªαñ░αñ╡αñ╛αñ£αñ╝αñ╛',
-    'chair': 'αñòαÑüαñ░αÑìαñ╕αÑÇ',
-    'table': 'αñ«αÑçαñ£',
-    'cabinet': 'αñòαÑêαñ¼αñ┐αñ¿αÑçαñƒ',
-    'couch': 'αñ╕αÑïαñ½αñ╝αñ╛',
-    'pole': 'αñûαñéαñ¡αñ╛',
-    'vehiclehazard': 'αñ╡αñ╛αñ╣αñ¿ αñûαññαñ░αñ╛',
-    'humannearby': 'αñ╡αÑìαñ»αñòαÑìαññαñ┐ αñ¬αñ╛αñ╕ αñ«αÑçαñé',
-    'animalhazard': 'αñ£αñ╛αñ¿αñ╡αñ░ αñûαññαñ░αñ╛',
-    'roadhazard': 'αñ╕αñíαñ╝αñò αñûαññαñ░αñ╛',
-    'roadsideobstacle': 'αñ╕αñíαñ╝αñò αñòαñ┐αñ¿αñ╛αñ░αÑç αñ¼αñ╛αñºαñ╛',
-  };
-
-  static const Map<String, String> _hindiGuidance = {
-    'vehicle': 'αñ¼αñ╛αñêαñé αñôαñ░ αñ░αñ╣αÑçαñéαÑñ',
-    'living': 'αñ░αñ╛αñ╕αÑìαññαñ╛ αñªαÑçαñéαÑñ',
-    'roadside': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
-    'non_drivable': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
-    'car': 'αñ¼αñ╛αñêαñé αñôαñ░ αñ░αñ╣αÑçαñéαÑñ',
-    'truck': 'αñ¼αñ╛αñêαñé αñôαñ░ αñ░αñ╣αÑçαñéαÑñ',
-    'bus': 'αñ¼αñ╛αñêαñé αñôαñ░ αñ░αñ╣αÑçαñéαÑñ',
-    'motorcycle': 'αñ¼αñ╛αñêαñé αñôαñ░ αñ░αñ╣αÑçαñéαÑñ',
-    'bicycle': 'αñ¼αñ╛αñêαñé αñôαñ░ αñ░αñ╣αÑçαñéαÑñ',
-    'autorickshaw': 'αñ¼αñ╛αñêαñé αñôαñ░ αñ░αñ╣αÑçαñéαÑñ',
-    'rickshaw': 'αñ¼αñ╛αñêαñé αñôαñ░ αñ░αñ╣αÑçαñéαÑñ',
-    'scooter': 'αñ¼αñ╛αñêαñé αñôαñ░ αñ░αñ╣αÑçαñéαÑñ',
-    'pothole': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
-    'speedbump': 'αñºαÑÇαñ░αÑç αñÜαñ▓αÑçαñéαÑñ',
-    'bump': 'αñºαÑÇαñ░αÑç αñÜαñ▓αÑçαñéαÑñ',
-    'barricade': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
-    'barrier': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
-    'construction': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
-    'cone': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
-    'door': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
-    'openeddoor': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
-    'cabinetdoor': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
-    'refrigeratordoor': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
-    'chair': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
-    'table': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
-    'cabinet': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
-    'couch': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
-    'pole': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
-    'electricpole': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
-    'powerpole': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
-    'streetlight': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
-    'vehiclehazard': 'αñ¼αñ╛αñêαñé αñôαñ░ αñ░αñ╣αÑçαñéαÑñ',
-    'humannearby': 'αñºαÑÇαñ░αÑç αñÜαñ▓αÑçαñéαÑñ',
-    'animalhazard': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
-    'roadhazard': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
-    'roadsideobstacle': 'αñ╕αñ╛αñ╡αñºαñ╛αñ¿ αñ░αñ╣αÑçαñéαÑñ',
-  };
+  static const Map<String, String> _hindiLabels = {};
+  static const Map<String, String> _hindiGuidance = {};
 
   static const Map<DeviceOrientation, int> _deviceRotation = {
     DeviceOrientation.portraitUp: 0,
@@ -1228,7 +1152,7 @@ class _HomeScreenState extends State<HomeScreen>
         SnackBar(
           content: Text(
             result.success
-                ? '✓ ${result.name} registered (${result.recordsForPerson} photos)'
+                ? 'Registered ${result.name} (${result.recordsForPerson} photos)'
                 : 'Registration failed: ${result.message}',
           ),
           backgroundColor: result.success
@@ -1297,7 +1221,7 @@ class _HomeScreenState extends State<HomeScreen>
       );
       final controller = CameraController(
         selectedCamera,
-        ResolutionPreset.high,
+        ResolutionPreset.medium,
         enableAudio: false,
         imageFormatGroup: Platform.isIOS ? ImageFormatGroup.bgra8888 : ImageFormatGroup.yuv420,
       );
@@ -1710,22 +1634,24 @@ class _HomeScreenState extends State<HomeScreen>
         roadBody = 'No nearby hazards detected.';
         roadAccentColor = const Color(0xFFFFE4A3);
       } else {
+        final spokenLabel = _capitalize(_humanizeLabel(fallback.label));
         final distanceText = fallback.distanceMeters == null
             ? ''
-            : ' ΓÇó ${fallback.distanceMeters!.toStringAsFixed(1)}m';
+            : ' - ${fallback.distanceMeters!.toStringAsFixed(1)}m';
         roadTitle = 'Road detected';
         roadBody =
-            '${fallback.label}$distanceText ΓÇó ${(fallback.score * 100).toStringAsFixed(1)}%';
+            '$spokenLabel$distanceText - ${(fallback.score * 100).toStringAsFixed(1)}%';
         roadAccentColor = const Color(0xFF9FB0C7);
       }
     } else {
       final top = roadAlerts.first;
+      final spokenLabel = _capitalize(_humanizeLabel(top.label));
       final distanceText = top.distanceMeters == null
           ? ''
-          : ' ΓÇó ${top.distanceMeters!.toStringAsFixed(1)}m';
+          : ' - ${top.distanceMeters!.toStringAsFixed(1)}m';
       roadTitle = 'Road alert';
       roadBody =
-          '${top.label} ΓÇó ${top.proximity}$distanceText ΓÇó ${(top.score * 100).toStringAsFixed(1)}%';
+          '$spokenLabel - ${top.proximity}$distanceText - ${(top.score * 100).toStringAsFixed(1)}%';
       roadAccentColor = const Color(0xFFB6F3C2);
     }
 
@@ -1748,22 +1674,24 @@ class _HomeScreenState extends State<HomeScreen>
         indoorBody = 'No nearby hazards detected.';
         indoorAccentColor = const Color(0xFFFFE4A3);
       } else {
+        final spokenLabel = _capitalize(_humanizeLabel(fallback.label));
         final distanceText = fallback.distanceMeters == null
             ? ''
-            : ' ΓÇó ${fallback.distanceMeters!.toStringAsFixed(1)}m';
+            : ' - ${fallback.distanceMeters!.toStringAsFixed(1)}m';
         indoorTitle = 'Indoor detected';
         indoorBody =
-            '${fallback.label}$distanceText ΓÇó ${(fallback.score * 100).toStringAsFixed(1)}%';
+            '$spokenLabel$distanceText - ${(fallback.score * 100).toStringAsFixed(1)}%';
         indoorAccentColor = const Color(0xFF9FB0C7);
       }
     } else {
       final top = indoorAlerts.first;
+      final spokenLabel = _capitalize(_humanizeLabel(top.label));
       final distanceText = top.distanceMeters == null
           ? ''
-          : ' ΓÇó ${top.distanceMeters!.toStringAsFixed(1)}m';
+          : ' - ${top.distanceMeters!.toStringAsFixed(1)}m';
       indoorTitle = 'Indoor alert';
       indoorBody =
-          '${top.label} ΓÇó ${top.proximity}$distanceText ΓÇó ${(top.score * 100).toStringAsFixed(1)}%';
+          '$spokenLabel - ${top.proximity}$distanceText - ${(top.score * 100).toStringAsFixed(1)}%';
       indoorAccentColor = const Color(0xFFB6F3C2);
     }
 
@@ -2099,7 +2027,7 @@ class _HomeScreenState extends State<HomeScreen>
         for (final line in block.lines) {
           final box = line.boundingBox;
           if (box == null) continue;
-          final bestRect = bestRectFor(box, 0.12);
+          final bestRect = bestRectFor(box, 0.08);
           if (bestRect == null) continue;
           final heightRatio = box.height / bestRect.height;
           if (heightRatio < 0.02 || heightRatio > 0.95) continue;
@@ -2118,7 +2046,7 @@ class _HomeScreenState extends State<HomeScreen>
         for (final block in result.blocks) {
           final box = block.boundingBox;
           if (box == null) continue;
-          final bestRect = bestRectFor(box, 0.12);
+          final bestRect = bestRectFor(box, 0.08);
           if (bestRect == null) continue;
           final heightRatio = box.height / bestRect.height;
           if (heightRatio < 0.02 || heightRatio > 0.95) continue;
@@ -2146,14 +2074,14 @@ class _HomeScreenState extends State<HomeScreen>
 
   List<Rect> _getActiveSignboardRects(List<YoloDetection> signboards) {
     if (signboards.isNotEmpty) {
-      return signboards.map((d) => _expandRect(d.rect, 0.22)).toList();
+      return signboards.map((d) => _expandRect(d.rect, 0.28)).toList();
     }
     final now = DateTime.now();
     if (_signboardLandmark == null) return const [];
     if (now.difference(_signboardLandmarkAt) > _signboardLandmarkHold) {
       return const [];
     }
-    return [_expandRect(_signboardLandmark!, 0.28)];
+    return [_expandRect(_signboardLandmark!, 0.32)];
   }
 
   Rect _expandRect(Rect rect, double padRatio) {
@@ -2203,8 +2131,44 @@ class _HomeScreenState extends State<HomeScreen>
     return kept.join(' ').trim();
   }
 
+  Duration _effectiveOcrInterval(DateTime now) {
+    final hasActiveSignboardFocus = _signboardLandmark != null &&
+        now.difference(_signboardLandmarkAt) <= _signboardLandmarkHold;
+    return hasActiveSignboardFocus ? _focusedOcrInterval : _ocrInterval;
+  }
+
+  bool _looksLikeSignboardText(String text) {
+    final cleaned = _shortenSignboardText(_cleanSignboardText(text));
+    if (cleaned.length < 3) return false;
+    final normalized = _normalizeText(cleaned);
+    if (normalized.isEmpty) return false;
+
+    const keywords = <String>{
+      'exit',
+      'entry',
+      'entrance',
+      'gate',
+      'hospital',
+      'clinic',
+      'pharmacy',
+      'toilet',
+      'washroom',
+      'restroom',
+      'reception',
+      'office',
+      'parking',
+      'emergency',
+      'lift',
+      'stairs',
+    };
+    if (keywords.any(normalized.contains)) return true;
+
+    final words = normalized.split(' ').where((w) => w.length > 1).toList();
+    return words.length >= 1 && words.length <= 6 && cleaned.length <= 60;
+  }
+
   bool _lineLooksValid(String text) {
-    final cleaned = text.replaceAll(RegExp(r'[^A-Za-z0-9\u0900-\u097F]'), '');
+    final cleaned = text.replaceAll(RegExp(r'[^A-Za-z0-9\u0900-\u097F\u0B80-\u0BFF]'), '');
     if (cleaned.length < 2) return false;
     final ratio = cleaned.length / text.length;
     if (ratio < 0.35) return false;
@@ -2213,9 +2177,9 @@ class _HomeScreenState extends State<HomeScreen>
 
   bool _tokenLooksValid(String token) {
     if (token.length < 2) return false;
-    final cleaned = token.replaceAll(RegExp(r'[^A-Za-z0-9\u0900-\u097F]'), '');
+    final cleaned = token.replaceAll(RegExp(r'[^A-Za-z0-9\u0900-\u097F\u0B80-\u0BFF]'), '');
     if (cleaned.length < 2) return false;
-    final nonWord = token.replaceAll(RegExp(r'[A-Za-z0-9\u0900-\u097F]'), '');
+    final nonWord = token.replaceAll(RegExp(r'[A-Za-z0-9\u0900-\u097F\u0B80-\u0BFF]'), '');
     final noiseRatio = nonWord.length / token.length;
     if (noiseRatio > 0.5) return false;
     if (RegExp(r'^(.)\1{3,}$').hasMatch(cleaned)) return false;
@@ -2226,11 +2190,6 @@ class _HomeScreenState extends State<HomeScreen>
     final direction = _directionForRect(detection.rect);
     final distanceWord = _distanceDescriptor(detection);
     final directionPhrase = direction == 'ahead' ? 'ahead' : 'on your $direction';
-    if (_selectedLanguage == 'Hindi') {
-      final hindiDirection = _hindiDirection(direction);
-      final hindiDistance = _hindiDistanceDescriptor(detection, direction);
-      return 'αñ╕αñ╛αñçαñ¿αñ¼αÑïαñ░αÑìαñí: $text, $hindiDistance $hindiDirection αñ╣αÑêαÑñ';
-    }
     return 'Signboard: $text, $distanceWord $directionPhrase.';
   }
 
@@ -2379,10 +2338,13 @@ class _HomeScreenState extends State<HomeScreen>
     final normalized = _normalizeLabelForAlert(detection.label);
     final label = _hindiLabels[normalized] ?? _humanizeLabel(detection.label);
     final direction = _directionForRect(detection.rect);
-    final distanceWord = _hindiDistanceDescriptor(detection, direction);
+    var distanceWord = _hindiDistanceDescriptor(detection, direction);
     final directionPhrase = _hindiDirection(direction);
     final guidance = _hindiGuidance[normalized];
-    final base = '$label $distanceWord $directionPhrase αñ╣αÑêαÑñ';
+    if (direction != 'ahead' && distanceWord == 'ahead') {
+      distanceWord = 'nearby';
+    }
+    final base = '${_capitalize(label)} $distanceWord $directionPhrase.';
     if (guidance == null) return base;
     return '$base $guidance';
   }
@@ -2390,11 +2352,11 @@ class _HomeScreenState extends State<HomeScreen>
   String _hindiDirection(String direction) {
     switch (direction) {
       case 'left':
-        return 'αñ¼αñ╛αñêαñé αñôαñ░';
+        return 'on your left';
       case 'right':
-        return 'αñªαñ╛αñêαñé αñôαñ░';
+        return 'on your right';
       default:
-        return 'αñ╕αñ╛αñ«αñ¿αÑç';
+        return 'ahead';
     }
   }
 
@@ -2405,31 +2367,31 @@ class _HomeScreenState extends State<HomeScreen>
     String word;
     if (distance != null) {
       if (distance <= buckets[0]) {
-        word = 'αñ¼αñ╣αÑüαññ αñ¬αñ╛αñ╕';
+        word = 'very close';
       } else if (distance <= buckets[1]) {
-        word = 'αñ¬αñ╛αñ╕';
+        word = 'nearby';
       } else if (distance <= buckets[2]) {
-        word = 'αñåαñùαÑç';
+        word = 'ahead';
       } else {
-        word = 'αñªαÑéαñ░';
+        word = 'far';
       }
     } else {
       switch (detection.proximity) {
         case 'urgent':
-          word = 'αñ¼αñ╣αÑüαññ αñ¬αñ╛αñ╕';
+          word = 'very close';
           break;
         case 'near':
-          word = 'αñ¬αñ╛αñ╕';
+          word = 'nearby';
           break;
         case 'mid':
-          word = 'αñåαñùαÑç';
+          word = 'ahead';
           break;
         default:
-          word = 'αñªαÑéαñ░';
+          word = 'far';
       }
     }
-    if (direction != 'ahead' && word == 'αñåαñùαÑç') {
-      word = 'αñ¬αñ╛αñ╕';
+    if (direction != 'ahead' && word == 'ahead') {
+      word = 'nearby';
     }
     return word;
   }
@@ -2508,7 +2470,7 @@ class _HomeScreenState extends State<HomeScreen>
 
     // Periodically capture a JPEG frame for person registration.
     if (now.difference(_latestRegistrationFrameAt) >= const Duration(milliseconds: 1200)) {
-      final jpeg = _buildGeminiImage(image);
+      final jpeg = _buildPersonRecognitionImage(image);
       if (jpeg != null) {
         _latestRegistrationFrame = jpeg;
         _latestRegistrationFrameAt = now;
@@ -2518,8 +2480,22 @@ class _HomeScreenState extends State<HomeScreen>
     try {
       final inputImage = _inputImageFromCameraImage(image);
       if (inputImage == null) return;
+      final bool shouldRunRoad = _yoloReady &&
+          !_yoloInFlight &&
+          _frameIndex % _yoloFrameStride == 0 &&
+          now.difference(_lastYoloTime) > _yoloInterval;
+      final bool shouldRunIndoor = _indoorReady &&
+          !_indoorInFlight &&
+          _frameIndex % _indoorFrameStride == _indoorFrameOffset &&
+          now.difference(_lastIndoorTime) > _yoloInterval;
+      final bool shouldRunSignboard = _signboardReady &&
+          !_signboardInFlight &&
+          _frameIndex % _signboardFrameStride == _signboardFrameOffset &&
+          now.difference(_lastSignboardTime) > _signboardInterval;
       final forceOcr = _pendingConversationQuestion != null || _intentModeEnabled || !_signboardReady;
-      final shouldRunOcr = forceOcr || now.difference(_lastOcrTime) >= _ocrInterval;
+      final shouldRunOcr = forceOcr ||
+          shouldRunSignboard ||
+          now.difference(_lastOcrTime) >= _effectiveOcrInterval(now);
       List<RecognizedText> ocrResults = const [];
       var mergedText = _lastIntentOcrText;
       if (shouldRunOcr) {
@@ -2554,18 +2530,6 @@ class _HomeScreenState extends State<HomeScreen>
         _handleOcrResult(mergedText, image);
       }
 
-      final bool shouldRunRoad = _yoloReady &&
-          !_yoloInFlight &&
-          _frameIndex % _yoloFrameStride == 0 &&
-          now.difference(_lastYoloTime) > _yoloInterval;
-      final bool shouldRunIndoor = _indoorReady &&
-          !_indoorInFlight &&
-          _frameIndex % _indoorFrameStride == _indoorFrameOffset &&
-          now.difference(_lastIndoorTime) > _yoloInterval;
-      final bool shouldRunSignboard = _signboardReady &&
-          !_signboardInFlight &&
-          _frameIndex % _signboardFrameStride == _signboardFrameOffset &&
-          now.difference(_lastSignboardTime) > _signboardInterval;
       if (shouldRunRoad) {
         _yoloInFlight = true;
         _lastYoloTime = now;
@@ -2664,7 +2628,7 @@ class _HomeScreenState extends State<HomeScreen>
             try {
               final detections = await _signboardDetector.detect(
                 rgbImage,
-                confThreshold: 0.25,
+                confThreshold: 0.20,
               );
               final scaledDetections = _scaleDetectionsToFrame(detections, rgbImage);
               if (mounted) {
@@ -2684,7 +2648,10 @@ class _HomeScreenState extends State<HomeScreen>
                 speakTarget = top;
                 rectSources = sorted;
               }
-              final text = _extractTextFromSignboards(ocrResults, rectSources);
+              var text = _extractTextFromSignboards(ocrResults, rectSources);
+              if (text.isEmpty && _looksLikeSignboardText(mergedText)) {
+                text = _shortenSignboardText(_cleanSignboardText(mergedText));
+              }
               if (text.isNotEmpty) {
                 _lastIntentOcrText = text;
                 if (mounted) {
@@ -2898,6 +2865,47 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
+  bool _isGeminiQuotaError(Object error) {
+    final lower = error.toString().toLowerCase();
+    return lower.contains('429') ||
+        lower.contains('quota') ||
+        lower.contains('resource_exhausted');
+  }
+
+  bool _isGeminiBackoffActive([DateTime? now]) {
+    final checkAt = now ?? DateTime.now();
+    return checkAt.isBefore(_geminiQuotaUntil);
+  }
+
+  Duration _nextGeminiQuotaBackoff() {
+    final exponent = (_geminiQuotaErrorCount - 1).clamp(0, 4);
+    final seconds = 60 * (1 << exponent);
+    final capped = seconds > _geminiMaxQuotaBackoff.inSeconds
+        ? _geminiMaxQuotaBackoff.inSeconds
+        : seconds;
+    return Duration(seconds: capped);
+  }
+
+  void _registerGeminiSuccess() {
+    _geminiQuotaErrorCount = 0;
+    _geminiQuotaUntil = DateTime.fromMillisecondsSinceEpoch(0);
+  }
+
+  void _registerGeminiFailure(Object error) {
+    if (!_isGeminiQuotaError(error)) return;
+    _geminiQuotaErrorCount += 1;
+    final backoff = _nextGeminiQuotaBackoff();
+    _geminiQuotaUntil = DateTime.now().add(backoff);
+  }
+
+  String _fallbackSmartTextFromOcr(String text) {
+    final filtered = _filterOcrText(text);
+    if (filtered.isEmpty) return '';
+    final compact = filtered.replaceAll('\n', ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (compact.length <= 120) return compact;
+    return '${compact.substring(0, 120).trimRight()}...';
+  }
+
   Future<void> _maybeSendToGemini(String text, CameraImage image) async {
     if (_signboardReady) {
       return;
@@ -2919,8 +2927,8 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
     final now = DateTime.now();
-    // 429 quota backoff — skip Gemini until backoff expires.
-    if (now.isBefore(_geminiQuotaUntil)) return;
+    // Skip Gemini until quota backoff expires.
+    if (_isGeminiBackoffActive(now)) return;
     if (now.difference(_lastGeminiCall) < _geminiCooldown) return;
 
     final filteredText = _filterOcrText(text);
@@ -2962,6 +2970,7 @@ class _HomeScreenState extends State<HomeScreen>
         jpegBytes: jpegBytes,
       );
       if (result == null) {
+        _lastGeminiText = '';
         if (mounted) {
           setState(() {
             _latestGeminiError = 'No response from Gemini.';
@@ -2975,6 +2984,7 @@ class _HomeScreenState extends State<HomeScreen>
         debugPrint('Gemini action: ${result.action!.type} -> ${result.action!.value}');
       }
       final speak = result.speak.trim();
+      _registerGeminiSuccess();
       if (mounted) {
         setState(() {
           _latestSmartText = speak;
@@ -2989,20 +2999,22 @@ class _HomeScreenState extends State<HomeScreen>
       }
     } catch (error) {
       debugPrint('Gemini error: $error');
+      _registerGeminiFailure(error);
+      _lastGeminiText = '';
       final errStr = error.toString();
-      final isQuota = errStr.contains('429') || errStr.toLowerCase().contains('quota');
-      if (isQuota) {
-        // Back off for 60 s on quota error — use OCR text directly meanwhile.
-        _geminiQuotaUntil = DateTime.now().add(_geminiQuotaBackoff);
-      }
+      final isQuota = _isGeminiQuotaError(error);
+      final fallbackText = _fallbackSmartTextFromOcr(filteredText);
       if (mounted) {
         setState(() {
           _latestGeminiError = isQuota
-              ? 'Gemini quota exceeded. Using OCR text for 60s.'
+              ? 'Gemini quota exceeded. Using on-device OCR fallback.'
               : 'Gemini error: $errStr';
-          _latestSmartText = '';
-          _latestSmartEmpty = false;
+          _latestSmartText = fallbackText;
+          _latestSmartEmpty = fallbackText.isEmpty;
         });
+      }
+      if (_soundEnabled && fallbackText.isNotEmpty) {
+        await _speakGeminiText(fallbackText);
       }
     } finally {
       _geminiInFlight = false;
@@ -3012,7 +3024,7 @@ class _HomeScreenState extends State<HomeScreen>
   /// Runs person recognition on a JPEG frame and speaks the result.
   Future<void> _runPersonRecognition(Uint8List jpegBytes) async {
     try {
-      final language = _selectedLanguage ?? 'English';
+      final language = _selectedLanguage;
       final result = await _personRecognitionService.analyzeFrame(
         jpegBytes: jpegBytes,
         language: language,
@@ -3020,18 +3032,21 @@ class _HomeScreenState extends State<HomeScreen>
       if (result == null) return;
       if (!result.shouldAnnounce) return;
 
-      final message = result.message.trim();
+      final knownName = result.name?.trim() ?? '';
+      final message = (result.isKnown && knownName.isNotEmpty)
+          ? 'There is $knownName in front of you.'
+          : result.message.trim();
       if (message.isEmpty) return;
 
       final now = DateTime.now();
-      // Avoid repeating the same person name within the speak cooldown.
-      final sameAsBefore = result.name != null &&
-          result.name == _lastSpokenPersonName &&
+      // Avoid repeating the same person within the speak cooldown.
+      final currentPersonKey = knownName.isNotEmpty ? knownName : result.status;
+      final sameAsBefore = currentPersonKey == _lastSpokenPersonName &&
           now.difference(_lastPersonSpeakTime) < _personSpeakCooldown;
       if (sameAsBefore) return;
 
       _lastPersonSpeakTime = now;
-      _lastSpokenPersonName = result.name ?? '';
+      _lastSpokenPersonName = currentPersonKey;
 
       if (mounted) {
         setState(() => _latestPersonMessage = message);
@@ -3092,6 +3107,27 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
 
+    if (!_geminiService.hasApiKey || _isGeminiBackoffActive()) {
+      if (mounted) {
+        setState(() {
+          _latestGeminiError = !_geminiService.hasApiKey
+              ? 'Gemini API key missing. Add GEMINI_API_KEY in .env.'
+              : 'Gemini temporarily unavailable due to quota. Using OCR-only mode.';
+          _latestSmartText = 'I cannot see that answer right now.';
+          _latestSmartEmpty = false;
+        });
+      }
+      if (_soundEnabled) {
+        if (_voiceAssistant.isListening.value) {
+          await _voiceAssistant.stop();
+        }
+        await _voiceAssistant.speak('I cannot see that answer right now.');
+      }
+      _conversationInFlight = false;
+      await _maybeContinueConversation();
+      return;
+    }
+
     final filteredText = _filterOcrTextForConversation(cleaned);
     final textForGemini = filteredText.isNotEmpty ? filteredText : cleaned;
     final jpegBytes = _buildGeminiImage(image);
@@ -3115,6 +3151,7 @@ class _HomeScreenState extends State<HomeScreen>
         jpegBytes: jpegBytes,
         preferredLanguage: _selectedLanguage,
       );
+      _registerGeminiSuccess();
       if (result == null) {
         final fallback = _localAnswerFromOcr(question, cleaned);
         if (fallback != null && fallback.trim().isNotEmpty) {
@@ -3164,6 +3201,7 @@ class _HomeScreenState extends State<HomeScreen>
       }
     } catch (error) {
       debugPrint('Conversation error: $error');
+      _registerGeminiFailure(error);
       final fallback = _localAnswerFromOcr(question, cleaned);
       if (fallback != null && fallback.trim().isNotEmpty) {
         if (mounted) {
@@ -3185,7 +3223,9 @@ class _HomeScreenState extends State<HomeScreen>
       }
       if (mounted) {
         setState(() {
-          _latestGeminiError = 'Gemini error: ${error.toString()}';
+          _latestGeminiError = _isGeminiQuotaError(error)
+              ? 'Gemini quota exceeded. Using OCR-only mode.'
+              : 'Gemini error: ${error.toString()}';
           _latestSmartText = '';
           _latestSmartEmpty = false;
         });
@@ -3215,7 +3255,7 @@ class _HomeScreenState extends State<HomeScreen>
     final now = DateTime.now();
 
     // --- Fast OCR-only path (no cooldown restriction, no API key needed) ---
-    // Use raw OCR text for intent matching ΓÇö don't over-filter it.
+    // Use raw OCR text for intent matching; do not over-filter it.
     // Prefer the most recent OCR text captured (signboard-cropped or full frame).
     final fullOcr = ocrText.trim();
     final bestOcr = _lastIntentOcrText.trim().isNotEmpty ? _lastIntentOcrText.trim() : fullOcr;
@@ -3228,6 +3268,7 @@ class _HomeScreenState extends State<HomeScreen>
 
     // --- Gemini path (rate-limited, requires API key) ---
     if (now.difference(_lastIntentCall) < _intentScanInterval) return;
+    if (_isGeminiBackoffActive(now)) return;
     if (!_geminiService.hasApiKey) return;
     _lastIntentCall = now;
 
@@ -3251,12 +3292,14 @@ class _HomeScreenState extends State<HomeScreen>
         ocrText: textForGemini,
         jpegBytes: jpegBytes,
       );
+      _registerGeminiSuccess();
       if (result == null || !result.match) {
         return;
       }
       await _announceIntentMatch(_activeIntentQuery ?? (result.category ?? intent), focusRect);
     } catch (error) {
       debugPrint('Intent error: $error');
+      _registerGeminiFailure(error);
     } finally {
       _intentInFlight = false;
     }
@@ -3445,10 +3488,20 @@ class _HomeScreenState extends State<HomeScreen>
 
   Uint8List? _buildGeminiImage(CameraImage image) {
     if (Platform.isIOS && image.format.group == ImageFormatGroup.bgra8888) {
-      return _buildJpegFromBgra(image);
+      return _buildJpegFromBgra(image, downscale: 2, quality: 75);
     }
     if (Platform.isAndroid) {
-      return _buildJpegFromYuv420(image);
+      return _buildJpegFromYuv420(image, downscale: 2, quality: 70);
+    }
+    return null;
+  }
+
+  Uint8List? _buildPersonRecognitionImage(CameraImage image) {
+    if (Platform.isIOS && image.format.group == ImageFormatGroup.bgra8888) {
+      return _buildJpegFromBgra(image, downscale: 1, quality: 84);
+    }
+    if (Platform.isAndroid) {
+      return _buildJpegFromYuv420(image, downscale: 1, quality: 82);
     }
     return null;
   }
@@ -3529,21 +3582,25 @@ class _HomeScreenState extends State<HomeScreen>
     return rgbImage;
   }
 
-  Uint8List? _buildJpegFromBgra(CameraImage image) {
+  Uint8List? _buildJpegFromBgra(
+    CameraImage image, {
+    int downscale = 2,
+    int quality = 75,
+  }) {
     if (image.planes.isEmpty) return null;
     final plane = image.planes.first;
     final bytes = plane.bytes;
     final width = image.width;
     final height = image.height;
-    const downscale = 2;
-    final outputWidth = (width / downscale).floor();
-    final outputHeight = (height / downscale).floor();
+    final effectiveDownscale = downscale < 1 ? 1 : downscale;
+    final outputWidth = (width / effectiveDownscale).floor().clamp(1, width).toInt();
+    final outputHeight = (height / effectiveDownscale).floor().clamp(1, height).toInt();
     final img.Image rgbImage = img.Image(width: outputWidth, height: outputHeight);
     final int rowStride = plane.bytesPerRow;
 
-    for (int y = 0, oy = 0; y < height; y += downscale, oy++) {
+    for (int y = 0, oy = 0; y < height; y += effectiveDownscale, oy++) {
       final int rowStart = y * rowStride;
-      for (int x = 0, ox = 0; x < width; x += downscale, ox++) {
+      for (int x = 0, ox = 0; x < width; x += effectiveDownscale, ox++) {
         final int index = rowStart + (x * 4);
         if (index + 3 >= bytes.length) continue;
         final int b = bytes[index];
@@ -3553,16 +3610,20 @@ class _HomeScreenState extends State<HomeScreen>
         rgbImage.setPixelRgba(ox, oy, r, g, b, a);
       }
     }
-    return Uint8List.fromList(img.encodeJpg(rgbImage, quality: 75));
+    return Uint8List.fromList(img.encodeJpg(rgbImage, quality: quality));
   }
 
-  Uint8List? _buildJpegFromYuv420(CameraImage image) {
+  Uint8List? _buildJpegFromYuv420(
+    CameraImage image, {
+    int downscale = 2,
+    int quality = 70,
+  }) {
     if (image.planes.length < 3) return null;
     final width = image.width;
     final height = image.height;
-    const downscale = 2;
-    final outputWidth = (width / downscale).floor();
-    final outputHeight = (height / downscale).floor();
+    final effectiveDownscale = downscale < 1 ? 1 : downscale;
+    final outputWidth = (width / effectiveDownscale).floor().clamp(1, width).toInt();
+    final outputHeight = (height / effectiveDownscale).floor().clamp(1, height).toInt();
     final img.Image rgbImage = img.Image(width: outputWidth, height: outputHeight);
 
     final yPlane = image.planes[0];
@@ -3572,10 +3633,10 @@ class _HomeScreenState extends State<HomeScreen>
     final int uvRowStride = uPlane.bytesPerRow;
     final int uvPixelStride = uPlane.bytesPerPixel ?? 1;
 
-    for (int y = 0, oy = 0; y < height; y += downscale, oy++) {
+    for (int y = 0, oy = 0; y < height; y += effectiveDownscale, oy++) {
       final int yRow = yRowStride * y;
       final int uvRow = uvRowStride * (y >> 1);
-      for (int x = 0, ox = 0; x < width; x += downscale, ox++) {
+      for (int x = 0, ox = 0; x < width; x += effectiveDownscale, ox++) {
         final int yIndex = yRow + x;
         final int uvIndex = uvRow + (x >> 1) * uvPixelStride;
 
@@ -3593,7 +3654,7 @@ class _HomeScreenState extends State<HomeScreen>
       }
     }
 
-    return Uint8List.fromList(img.encodeJpg(rgbImage, quality: 70));
+    return Uint8List.fromList(img.encodeJpg(rgbImage, quality: quality));
   }
 
   Future<void> _speakGeminiText(String text) async {
@@ -3670,7 +3731,7 @@ class _HomeScreenState extends State<HomeScreen>
     if (item.currency == r'$') {
       return '\$$value';
     }
-    if (item.currency == 'Γé╣') {
+    if (item.currency == 'INR') {
       return '$value rupees';
     }
     return value;
@@ -3679,12 +3740,15 @@ class _HomeScreenState extends State<HomeScreen>
   List<_MenuItem> _parseMenuItems(String ocrText) {
     final lines = ocrText.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).toList();
     final items = <_MenuItem>[];
-    final priceRegex = RegExp(r'((?:Γé╣|rs\\.?|inr|\\$)\\s*)?(\\d+(?:[.,]\\d{2})?)', caseSensitive: false);
+    final priceRegex = RegExp(
+      r'((?:rs\\.?|inr|\\$)\\s*)?(\\d+(?:[.,]\\d{2})?)',
+      caseSensitive: false,
+    );
     final defaultCurrency = _detectCurrency(ocrText);
     String? pendingName;
     for (final line in lines) {
       final matches = priceRegex.allMatches(line).toList();
-      final hasLetters = RegExp(r'[A-Za-z]').hasMatch(line);
+      final hasLetters = RegExp(r'[A-Za-z\u0900-\u097F\u0B80-\u0BFF]').hasMatch(line);
       if (matches.isNotEmpty) {
         final match = matches.last;
         final currencyToken = (match.group(1) ?? '').trim();
@@ -3710,8 +3774,8 @@ class _HomeScreenState extends State<HomeScreen>
   String _detectCurrency(String text) {
     final lower = text.toLowerCase();
     if (lower.contains(r'$')) return r'$';
-    if (lower.contains('?') || lower.contains('rs') || lower.contains('inr')) {
-      return 'Γé╣';
+    if (lower.contains('rs') || lower.contains('inr')) {
+      return 'INR';
     }
     return '';
   }
@@ -3719,8 +3783,8 @@ class _HomeScreenState extends State<HomeScreen>
   String _normalizeCurrency(String token, String fallback) {
     final lower = token.toLowerCase();
     if (lower.contains(r'$')) return r'$';
-    if (lower.contains('?') || lower.contains('rs') || lower.contains('inr')) {
-      return 'Γé╣';
+    if (lower.contains('rs') || lower.contains('inr')) {
+      return 'INR';
     }
     return fallback;
   }
@@ -3738,7 +3802,7 @@ class _HomeScreenState extends State<HomeScreen>
       if (normalized.isEmpty) continue;
       if (!seen.add(normalized)) continue;
 
-      final hasLetters = RegExp(r'[a-zA-Z]').hasMatch(trimmed);
+      final hasLetters = RegExp(r'[a-zA-Z\u0900-\u097F\u0B80-\u0BFF]').hasMatch(trimmed);
       final hasDigits = RegExp(r'\d').hasMatch(trimmed);
       final hasCurrency =
           RegExp(r'(rs\.?|inr|\$)', caseSensitive: false).hasMatch(trimmed);
@@ -3892,7 +3956,7 @@ class _HomeScreenState extends State<HomeScreen>
     for (final token in noisyTokens) {
       if (lower.contains(token)) return true;
     }
-    final alphaCount = RegExp(r'[a-zA-Z]').allMatches(line).length;
+    final alphaCount = RegExp(r'[a-zA-Z\u0900-\u097F\u0B80-\u0BFF]').allMatches(line).length;
     if (line.length > 0 && (alphaCount / line.length) < 0.3) {
       return true;
     }
@@ -3909,7 +3973,11 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   String _normalizeText(String text) {
-    return text.toLowerCase().replaceAll(RegExp(r'\s+'), ' ').trim();
+    return text
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9\u0900-\u097F\u0B80-\u0BFF\s]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
   }
 
   String _truncateText(String text, {int maxChars = 160}) {
@@ -4039,4 +4107,5 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 }
+
 

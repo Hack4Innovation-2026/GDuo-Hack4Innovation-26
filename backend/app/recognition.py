@@ -329,15 +329,15 @@ def _clamp_box(
 
 def _localized_known_message(language: str, name: str) -> str:
     if language == "Hindi":
-        return f"{name} आपके सामने हैं।"
+        return f"{name} aapke samne hain."
     if language == "Marathi":
-        return f"{name} तुमच्या समोर आहेत."
+        return f"{name} tumchya samor aahet."
     return f"{name} is in front of you."
 
 
 def _localized_unknown_message(language: str) -> str:
     if language == "Hindi":
-        return "अज्ञात व्यक्ति सामने है।"
+        return "Agyat vyakti samne hai."
     if language == "Marathi":
-        return "अनोळखी व्यक्ती समोर आहे."
+        return "Anolakhi vyakti samor aahe."
     return "Unknown person detected."
