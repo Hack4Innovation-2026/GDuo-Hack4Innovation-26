@@ -1,4 +1,4 @@
-# DrishtiAI — Smart AI-powered Accessibility Assistant
+# DrishtiAI — A smart AI-powered Visual Assistant
 
 A comprehensive AI-powered assistant for **visually impaired users**. DrishtiAI combines on-device scene understanding, real-time OCR, a local voice assistant, and a powerful Python backend to deliver grounded, actionable insights about the user's surroundings.
 
