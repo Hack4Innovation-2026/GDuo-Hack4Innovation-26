@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_dotenv/flutter_dotenv.dart';
@@ -72,21 +74,42 @@ class PersonRecognitionService {
 
   final http.Client _client;
   final String _baseUrl;
+  static const Duration _requestTimeout = Duration(seconds: 15);
 
   bool get isConfigured => _baseUrl.isNotEmpty;
+
+  Future<void> ensureBackendHealthy() async {
+    if (!isConfigured) {
+      throw Exception('Person recognition backend is not configured.');
+    }
+    final uri = _buildUri('/health');
+    try {
+      final response = await _client.get(uri).timeout(_requestTimeout);
+      if (response.statusCode == 200) return;
+      throw Exception('Backend health check failed: HTTP ${response.statusCode}');
+    } on TimeoutException {
+      throw Exception('Person recognition backend health check timed out.');
+    } on SocketException {
+      throw Exception(
+        'Unable to reach person recognition backend at $_baseUrl. Check server and phone network.',
+      );
+    } catch (e) {
+      throw Exception('Backend health check failed: $e');
+    }
+  }
 
   Future<PersonRecognitionResult?> analyzeFrame({
     required Uint8List jpegBytes,
     required String language,
   }) async {
     if (!isConfigured) return null;
-    final response = await _client.post(
-      _buildUri('/person-recognition/analyze'),
-      headers: const {'Content-Type': 'application/json'},
-      body: jsonEncode({
+    final response = await _postJson(
+      path: '/person-recognition/analyze',
+      payload: {
         'image_base64': base64Encode(jpegBytes),
         'language': _normalizeLanguage(language),
-      }),
+      },
+      fallbackMessage: 'Person recognition request timed out. Check backend connection.',
     );
     _throwIfNotOk(
       response,
@@ -103,13 +126,13 @@ class PersonRecognitionService {
     if (!isConfigured) {
       throw Exception('Person recognition backend is not configured.');
     }
-    final response = await _client.post(
-      _buildUri('/person-recognition/register'),
-      headers: const {'Content-Type': 'application/json'},
-      body: jsonEncode({
+    final response = await _postJson(
+      path: '/person-recognition/register',
+      payload: {
         'name': name.trim(),
         'image_base64': base64Encode(jpegBytes),
-      }),
+      },
+      fallbackMessage: 'Person registration timed out. Check backend connection.',
     );
     _throwIfNotOk(
       response,
@@ -129,6 +152,31 @@ class PersonRecognitionService {
             ? _baseUrl.substring(0, _baseUrl.length - 1)
             : _baseUrl;
     return Uri.parse('$normalizedBase$path');
+  }
+
+  Future<http.Response> _postJson({
+    required String path,
+    required Map<String, dynamic> payload,
+    required String fallbackMessage,
+  }) async {
+    final uri = _buildUri(path);
+    try {
+      return await _client
+          .post(
+            uri,
+            headers: const {'Content-Type': 'application/json'},
+            body: jsonEncode(payload),
+          )
+          .timeout(_requestTimeout);
+    } on TimeoutException {
+      throw Exception(fallbackMessage);
+    } on SocketException {
+      throw Exception(
+        'Unable to reach person recognition backend at $_baseUrl. Check server and phone network.',
+      );
+    } catch (e) {
+      throw Exception('Person recognition request failed: $e');
+    }
   }
 
   static String _normalizeLanguage(String language) {
@@ -159,6 +207,7 @@ class PersonRecognitionService {
     final normalized = value.toUpperCase();
     if (normalized.startsWith('YOUR_')) return false;
     if (normalized.contains('PLACEHOLDER')) return false;
+    if (!(value.startsWith('http://') || value.startsWith('https://'))) return false;
     return true;
   }
 

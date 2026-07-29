@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -34,10 +34,11 @@ class _DetectionHistory {
 }
 
 class _OcrLine {
-  const _OcrLine(this.text, this.rect);
+  const _OcrLine(this.text, this.rect, this.score);
 
   final String text;
   final Rect rect;
+  final double score;
 }
 
 class _MenuItem {
@@ -116,6 +117,12 @@ class _HomeScreenState extends State<HomeScreen>
   int _geminiQuotaErrorCount = 0;
   DateTime _lastPersonSpeakTime = DateTime.fromMillisecondsSinceEpoch(0);
   String _lastSpokenPersonName = '';
+  double _smoothedSignboardCenterX = 0.5;
+  String _lastSignboardDirection = 'ahead';
+  DateTime _lastSignboardDirectionAt = DateTime.fromMillisecondsSinceEpoch(0);
+  double _smoothedAlertCenterX = 0.5;
+  String _lastAlertDirection = 'ahead';
+  DateTime _lastAlertDirectionAt = DateTime.fromMillisecondsSinceEpoch(0);
   Uint8List? _latestRegistrationFrame;
   DateTime _latestRegistrationFrameAt = DateTime.fromMillisecondsSinceEpoch(0);
   bool _personRegistrationInFlight = false;
@@ -153,15 +160,15 @@ class _HomeScreenState extends State<HomeScreen>
 
   static const Duration _analysisInterval = Duration(milliseconds: 220);
   static const Duration _ocrInterval = Duration(milliseconds: 520);
-  static const Duration _focusedOcrInterval = Duration(milliseconds: 320);
+  static const Duration _focusedOcrInterval = Duration(milliseconds: 260);
   static const Duration _emitCooldown = Duration(milliseconds: 1500);
   static const Duration _speechCooldown = Duration(seconds: 4);
-  static const Duration _alertSpeakCooldown = Duration(seconds: 4);
-  static const Duration _signboardPriorityWindow = Duration(seconds: 5);
-  static const Duration _geminiCooldown = Duration(seconds: 12);
+  static const Duration _alertSpeakCooldown = Duration(seconds: 2);
+  static const Duration _geminiCooldown = Duration(seconds: 8);
   static const Duration _geminiMaxQuotaBackoff = Duration(minutes: 10);
   static const Duration _personRecognitionInterval = Duration(seconds: 2);
   static const Duration _personSpeakCooldown = Duration(seconds: 8);
+  static const Duration _directionStateHold = Duration(seconds: 2);
   static const Duration _conversationRearmDelay = Duration(milliseconds: 300);
   static const Duration _intentCooldown = Duration(seconds: 4);
   static const Duration _intentScanInterval = Duration(milliseconds: 1500);
@@ -199,9 +206,9 @@ class _HomeScreenState extends State<HomeScreen>
   static const int _yoloFrameStride = 5;
   static const int _indoorFrameStride = 6;
   static const int _indoorFrameOffset = 2;
-  static const Duration _signboardInterval = Duration(milliseconds: 320);
-  static const int _signboardFrameStride = 2;
-  static const int _signboardFrameOffset = 1;
+  static const Duration _signboardInterval = Duration(milliseconds: 240);
+  static const int _signboardFrameStride = 1;
+  static const int _signboardFrameOffset = 0;
   static const Duration _signboardSpeakCooldown = Duration(seconds: 6);
   static const Duration _signboardLandmarkHold = Duration(seconds: 2);
   static const double _signboardLandmarkSmoothing = 0.6;
@@ -209,9 +216,9 @@ class _HomeScreenState extends State<HomeScreen>
   static const double _roadMinConfidence = 0.45;
   static const double _indoorMinConfidence = 0.42;
   static const double _roadIndoorContextMinConfidence = 0.8;
-  static const double _roadNoContextMinConfidence = 0.75;
-  static const double _hazardSpeakDistanceMeters = 5.0;
-  static const int _alertStreakTarget = 3;
+  static const double _roadNoContextMinConfidence = 0.62;
+  static const double _hazardSpeakDistanceMeters = 7.0;
+  static const int _alertStreakTarget = 1;
   final Map<String, int> _alertStreaks = {};
   static const Duration _indoorContextHold = Duration(seconds: 3);
   DateTime _indoorContextUntil = DateTime.fromMillisecondsSinceEpoch(0);
@@ -332,9 +339,9 @@ class _HomeScreenState extends State<HomeScreen>
     'drivable': 'road',
     'far': 'distant area',
     'sky': 'sky',
-    'openeddoor': 'open door',
-    'cabinetdoor': 'cabinet door',
-    'refrigeratordoor': 'refrigerator door',
+    'openeddoor': 'door',
+    'cabinetdoor': 'door',
+    'refrigeratordoor': 'door',
     'electricpole': 'electric pole',
     'powerpole': 'electric pole',
     'streetlight': 'street light',
@@ -418,8 +425,8 @@ class _HomeScreenState extends State<HomeScreen>
   static const Map<String, double> _indoorMinAreaRatio = {
     'door': 0.06,
     'openeddoor': 0.06,
-    'cabinetdoor': 0.04,
-    'refrigeratordoor': 0.04,
+    'cabinetdoor': 0.05,
+    'refrigeratordoor': 0.05,
     'window': 0.03,
     'chair': 0.012,
     'table': 0.015,
@@ -428,27 +435,40 @@ class _HomeScreenState extends State<HomeScreen>
     'pole': 0.025,
   };
 
+  static const Map<String, double> _indoorMaxAreaRatio = {
+    'door': 0.72,
+    'openeddoor': 0.72,
+    'cabinetdoor': 0.50,
+    'refrigeratordoor': 0.55,
+    'window': 0.55,
+    'chair': 0.32,
+    'table': 0.45,
+    'cabinet': 0.58,
+    'couch': 0.62,
+    'pole': 0.28,
+  };
+
   static const Map<String, double> _indoorMinConfidenceByLabel = {
-    'door': 0.65,
-    'openeddoor': 0.65,
-    'cabinetdoor': 0.6,
-    'refrigeratordoor': 0.6,
-    'window': 0.6,
-    'cabinet': 0.6,
-    'chair': 0.48,
-    'table': 0.48,
-    'couch': 0.48,
+    'door': 0.68,
+    'openeddoor': 0.68,
+    'cabinetdoor': 0.75,
+    'refrigeratordoor': 0.72,
+    'window': 0.54,
+    'cabinet': 0.58,
+    'chair': 0.44,
+    'table': 0.44,
+    'couch': 0.44,
     'pole': 0.55,
     'stair': 0.48,
     'stairs': 0.48,
   };
 
   static const Map<String, double> _roadMinConfidenceByLabel = {
-    'vehiclehazard': 0.78,
-    'humannearby': 0.60,
-    'animalhazard': 0.60,
-    'roadhazard': 0.65,
-    'roadsideobstacle': 0.60,
+    'vehiclehazard': 0.62,
+    'humannearby': 0.55,
+    'animalhazard': 0.55,
+    'roadhazard': 0.58,
+    'roadsideobstacle': 0.56,
   };
 
   static const Map<String, double> _roadMinAreaRatio = {
@@ -462,7 +482,7 @@ class _HomeScreenState extends State<HomeScreen>
   static const Map<String, double> _indoorMinAspectRatio = {
     'door': 1.25,
     'openeddoor': 1.25,
-    'cabinetdoor': 1.0,
+    'cabinetdoor': 1.2,
     'refrigeratordoor': 1.2,
   };
 
@@ -865,7 +885,7 @@ class _HomeScreenState extends State<HomeScreen>
         color: const Color(0xFFCC0000),
         tooltip: 'Emergency Call',
         onPressed: () {
-          unawaited(_launchCall(_emergencyContactNumber));
+          unawaited(_callSavedEmergencyContact());
         },
         constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
       ),
@@ -878,7 +898,7 @@ class _HomeScreenState extends State<HomeScreen>
       right: 24,
       child: InkWell(
         onTap: () {
-          // Trigger SOS action
+          unawaited(_callSavedEmergencyContact());
         },
         borderRadius: BorderRadius.circular(32),
         child: Container(
@@ -1143,6 +1163,7 @@ class _HomeScreenState extends State<HomeScreen>
 
     setState(() => _personRegistrationInFlight = true);
     try {
+      await _personRecognitionService.ensureBackendHealthy();
       final result = await _personRecognitionService.registerPerson(
         name: name,
         jpegBytes: frame,
@@ -1425,6 +1446,12 @@ class _HomeScreenState extends State<HomeScreen>
       onUserResponse: (text) async {
         final trimmed = text.trim();
         if (trimmed.isEmpty) return;
+        if (await _handleVoiceEmergencyCallCommand(trimmed)) {
+          if (_conversationModeEnabled) {
+            unawaited(_requestConversationQuestion(initialPrompt: false));
+          }
+          return;
+        }
         _pendingConversationQuestion = trimmed;
       },
     );
@@ -1445,6 +1472,12 @@ class _HomeScreenState extends State<HomeScreen>
       onUserResponse: (text) async {
         final trimmed = text.trim();
         if (trimmed.isEmpty) return;
+        if (await _handleVoiceEmergencyCallCommand(trimmed)) {
+          if (_intentModeEnabled) {
+            unawaited(_requestIntentQuery(initialPrompt: false));
+          }
+          return;
+        }
         _pendingIntentQuery = trimmed;
         _activeIntentQuery = trimmed;
         await _maybeOpenMapsForIntentQuery(trimmed);
@@ -1634,24 +1667,28 @@ class _HomeScreenState extends State<HomeScreen>
         roadBody = 'No nearby hazards detected.';
         roadAccentColor = const Color(0xFFFFE4A3);
       } else {
-        final spokenLabel = _capitalize(_humanizeLabel(fallback.label));
+        final spokenLabel = _capitalize(_statusLabelForDetection(fallback));
+        final direction = _directionForRect(fallback.rect);
+        final directionText = direction == 'ahead' ? 'ahead' : 'on $direction';
         final distanceText = fallback.distanceMeters == null
             ? ''
             : ' - ${fallback.distanceMeters!.toStringAsFixed(1)}m';
         roadTitle = 'Road detected';
         roadBody =
-            '$spokenLabel$distanceText - ${(fallback.score * 100).toStringAsFixed(1)}%';
+            '$spokenLabel - $directionText$distanceText - ${(fallback.score * 100).toStringAsFixed(1)}%';
         roadAccentColor = const Color(0xFF9FB0C7);
       }
     } else {
       final top = roadAlerts.first;
-      final spokenLabel = _capitalize(_humanizeLabel(top.label));
+      final spokenLabel = _capitalize(_statusLabelForDetection(top));
+      final direction = _directionForRect(top.rect);
+      final directionText = direction == 'ahead' ? 'ahead' : 'on $direction';
       final distanceText = top.distanceMeters == null
           ? ''
           : ' - ${top.distanceMeters!.toStringAsFixed(1)}m';
       roadTitle = 'Road alert';
       roadBody =
-          '$spokenLabel - ${top.proximity}$distanceText - ${(top.score * 100).toStringAsFixed(1)}%';
+          '$spokenLabel - $directionText - ${top.proximity}$distanceText - ${(top.score * 100).toStringAsFixed(1)}%';
       roadAccentColor = const Color(0xFFB6F3C2);
     }
 
@@ -1674,24 +1711,28 @@ class _HomeScreenState extends State<HomeScreen>
         indoorBody = 'No nearby hazards detected.';
         indoorAccentColor = const Color(0xFFFFE4A3);
       } else {
-        final spokenLabel = _capitalize(_humanizeLabel(fallback.label));
+        final spokenLabel = _capitalize(_statusLabelForDetection(fallback));
+        final direction = _directionForRect(fallback.rect);
+        final directionText = direction == 'ahead' ? 'ahead' : 'on $direction';
         final distanceText = fallback.distanceMeters == null
             ? ''
             : ' - ${fallback.distanceMeters!.toStringAsFixed(1)}m';
         indoorTitle = 'Indoor detected';
         indoorBody =
-            '$spokenLabel$distanceText - ${(fallback.score * 100).toStringAsFixed(1)}%';
+            '$spokenLabel - $directionText$distanceText - ${(fallback.score * 100).toStringAsFixed(1)}%';
         indoorAccentColor = const Color(0xFF9FB0C7);
       }
     } else {
       final top = indoorAlerts.first;
-      final spokenLabel = _capitalize(_humanizeLabel(top.label));
+      final spokenLabel = _capitalize(_statusLabelForDetection(top));
+      final direction = _directionForRect(top.rect);
+      final directionText = direction == 'ahead' ? 'ahead' : 'on $direction';
       final distanceText = top.distanceMeters == null
           ? ''
           : ' - ${top.distanceMeters!.toStringAsFixed(1)}m';
       indoorTitle = 'Indoor alert';
       indoorBody =
-          '$spokenLabel - ${top.proximity}$distanceText - ${(top.score * 100).toStringAsFixed(1)}%';
+          '$spokenLabel - $directionText - ${top.proximity}$distanceText - ${(top.score * 100).toStringAsFixed(1)}%';
       indoorAccentColor = const Color(0xFFB6F3C2);
     }
 
@@ -1741,12 +1782,15 @@ class _HomeScreenState extends State<HomeScreen>
       if (isIndoor) {
         final minArea = _indoorMinAreaRatio[normalized];
         if (minArea != null && d.areaRatio < minArea) return false;
+        final maxArea = _indoorMaxAreaRatio[normalized];
+        if (maxArea != null && d.areaRatio > maxArea) return false;
         if (!_passesAspectRatioForLabel(normalized, d.rect)) return false;
+        if (!_passesIndoorPositionGate(normalized, d.rect)) return false;
         // Allow first indoor detection through even without context (fix chicken-and-egg).
       } else {
         final minArea = _roadMinAreaRatio[normalized];
         if (minArea != null && d.areaRatio < minArea) return false;
-        if (!hasRoadContext) return false;
+        if (!hasRoadContext && d.score < _roadNoContextMinConfidence) return false;
       }
       if (d.distanceMeters != null) {
         return d.distanceMeters! <= _hazardSpeakDistanceMeters;
@@ -1785,6 +1829,22 @@ class _HomeScreenState extends State<HomeScreen>
     if (rect.width <= 0 || rect.height <= 0) return false;
     final ratio = rect.height / rect.width;
     return ratio >= minRatio;
+  }
+
+  bool _passesIndoorPositionGate(String normalized, Rect rect) {
+    final frame = _lastFrameSize;
+    if (frame == null || frame.width <= 0 || frame.height <= 0) return true;
+    final centerX = rect.center.dx / frame.width;
+    final centerY = rect.center.dy / frame.height;
+    // False cabinet-door detections often appear on frame extremes.
+    if (normalized == 'cabinetdoor' || normalized == 'refrigeratordoor') {
+      if (centerX < 0.08 || centerX > 0.92) return false;
+      if (centerY < 0.08 || centerY > 0.92) return false;
+    }
+    if (normalized == 'door' || normalized == 'openeddoor') {
+      if (centerX < 0.04 || centerX > 0.96) return false;
+    }
+    return true;
   }
 
   List<YoloDetection> _applyTemporalStability(
@@ -1894,6 +1954,45 @@ class _HomeScreenState extends State<HomeScreen>
     return sorted.first;
   }
 
+  bool _isDetectionSpeakable(YoloDetection detection, {required bool indoor}) {
+    final normalized = _normalizeLabelForAlert(detection.label);
+    final minConfidence = indoor
+        ? (_indoorMinConfidenceByLabel[normalized] ?? _indoorMinConfidence)
+        : (_roadMinConfidenceByLabel[normalized] ?? _roadMinConfidence);
+    if (detection.score < (minConfidence - 0.08)) return false;
+    final distance = detection.distanceMeters;
+    if (distance != null && distance.isFinite) {
+      return distance <= (_hazardSpeakDistanceMeters + 3.0);
+    }
+    return detection.proximity == 'urgent' ||
+        detection.proximity == 'near' ||
+        detection.proximity == 'mid';
+  }
+
+  YoloDetection? _pickFallbackDetectionForSpeech() {
+    final roadTop = _topByScore(_latestDetections);
+    final indoorTop = _topByScore(_latestIndoorDetections);
+    final candidates = <YoloDetection>[];
+    if (roadTop != null && _isDetectionSpeakable(roadTop, indoor: false)) {
+      candidates.add(roadTop);
+    }
+    if (indoorTop != null && _isDetectionSpeakable(indoorTop, indoor: true)) {
+      candidates.add(indoorTop);
+    }
+    if (candidates.isEmpty) return null;
+    candidates.sort((a, b) {
+      final da = a.distanceMeters;
+      final db = b.distanceMeters;
+      if (da != null && db != null && da != db) {
+        return da.compareTo(db);
+      }
+      if (da != null && db == null) return -1;
+      if (da == null && db != null) return 1;
+      return b.score.compareTo(a.score);
+    });
+    return candidates.first;
+  }
+
   String? _hazardLabelForNormalized(String normalized) {
     if (_vehicleClassLabels.contains(normalized)) return _vehicleHazardLabel;
     if (_humanClassLabels.contains(normalized)) return _humanHazardLabel;
@@ -1922,6 +2021,7 @@ class _HomeScreenState extends State<HomeScreen>
             areaRatio: det.areaRatio,
             proximity: det.proximity,
             distanceMeters: det.distanceMeters,
+            sourceLabel: det.sourceLabel ?? det.label,
           ),
         );
       }
@@ -1992,6 +2092,7 @@ class _HomeScreenState extends State<HomeScreen>
       areaRatio: areaRatio,
       proximity: proximity,
       distanceMeters: null,
+      sourceLabel: 'dark_patch',
     );
   }
 
@@ -2005,21 +2106,32 @@ class _HomeScreenState extends State<HomeScreen>
     final candidates = <_OcrLine>[];
     final seen = <String>{};
 
-    Rect? bestRectFor(Rect rect, double minOverlap) {
+    ({Rect? rect, double overlap}) bestRectFor(Rect rect, double minOverlap) {
       Rect? best;
       double bestOverlap = 0.0;
       for (final r in rects) {
-        if (!r.overlaps(rect)) continue;
-        final inter = r.intersect(rect);
-        if (inter.isEmpty) continue;
-        final overlap = (inter.width * inter.height) / (rect.width * rect.height);
+        final intersects = r.overlaps(rect);
+        final centerInside = r.contains(rect.center);
+        if (!intersects && !centerInside) continue;
+        var overlap = 0.0;
+        if (intersects) {
+          final inter = r.intersect(rect);
+          if (!inter.isEmpty) {
+            overlap = (inter.width * inter.height) / (rect.width * rect.height);
+          }
+        }
+        if (centerInside && overlap < 0.06) {
+          overlap = 0.06;
+        }
         if (overlap > bestOverlap) {
           bestOverlap = overlap;
           best = r;
         }
       }
-      if (bestOverlap < minOverlap) return null;
-      return best;
+      if (bestOverlap < minOverlap) {
+        return (rect: null, overlap: 0.0);
+      }
+      return (rect: best, overlap: bestOverlap);
     }
 
     for (final result in results) {
@@ -2027,16 +2139,21 @@ class _HomeScreenState extends State<HomeScreen>
         for (final line in block.lines) {
           final box = line.boundingBox;
           if (box == null) continue;
-          final bestRect = bestRectFor(box, 0.08);
+          final match = bestRectFor(box, 0.04);
+          final bestRect = match.rect;
           if (bestRect == null) continue;
           final heightRatio = box.height / bestRect.height;
-          if (heightRatio < 0.02 || heightRatio > 0.95) continue;
+          if (heightRatio < 0.015 || heightRatio > 1.05) continue;
           final raw = line.text.trim();
           if (raw.isEmpty) continue;
           if (!_lineLooksValid(raw)) continue;
           final key = _normalizeText(raw);
           if (key.isEmpty || !seen.add(key)) continue;
-          candidates.add(_OcrLine(raw, box));
+          final overlapBoost = (match.overlap * 2.0).clamp(0.0, 1.2);
+          final lengthBoost = raw.length >= 4 ? 0.25 : 0.0;
+          final keywordBoost = _hasDirectionalOrWayfindingToken(raw) ? 0.35 : 0.0;
+          final score = overlapBoost + lengthBoost + keywordBoost;
+          candidates.add(_OcrLine(raw, box, score));
         }
       }
     }
@@ -2046,18 +2163,28 @@ class _HomeScreenState extends State<HomeScreen>
         for (final block in result.blocks) {
           final box = block.boundingBox;
           if (box == null) continue;
-          final bestRect = bestRectFor(box, 0.08);
+          final match = bestRectFor(box, 0.04);
+          final bestRect = match.rect;
           if (bestRect == null) continue;
           final heightRatio = box.height / bestRect.height;
-          if (heightRatio < 0.02 || heightRatio > 0.95) continue;
+          if (heightRatio < 0.015 || heightRatio > 1.05) continue;
           final raw = block.text.trim();
           if (raw.isEmpty) continue;
           if (!_lineLooksValid(raw)) continue;
           final key = _normalizeText(raw);
           if (key.isEmpty || !seen.add(key)) continue;
-          candidates.add(_OcrLine(raw, box));
+          final overlapBoost = (match.overlap * 2.0).clamp(0.0, 1.2);
+          final lengthBoost = raw.length >= 4 ? 0.2 : 0.0;
+          final keywordBoost = _hasDirectionalOrWayfindingToken(raw) ? 0.35 : 0.0;
+          final score = overlapBoost + lengthBoost + keywordBoost;
+          candidates.add(_OcrLine(raw, box, score));
         }
       }
+    }
+
+    if (candidates.length > 8) {
+      candidates.sort((a, b) => b.score.compareTo(a.score));
+      candidates.removeRange(8, candidates.length);
     }
 
     candidates.sort((a, b) {
@@ -2068,7 +2195,7 @@ class _HomeScreenState extends State<HomeScreen>
       return a.rect.left.compareTo(b.rect.left);
     });
 
-    final text = candidates.map((line) => line.text).join(' ').trim();
+    final text = candidates.map((line) => line.text).join('\n').trim();
     return _shortenSignboardText(_cleanSignboardText(text));
   }
 
@@ -2113,22 +2240,60 @@ class _HomeScreenState extends State<HomeScreen>
 
   String _shortenSignboardText(String text) {
     if (text.isEmpty) return text;
-    final cleaned = text.replaceAll(RegExp(r'\s+'), ' ').trim();
-    final words = cleaned.split(' ');
-    if (words.length <= 30) return cleaned;
-    return words.take(30).join(' ');
+    final lines = text
+        .split('\n')
+        .map((e) => e.replaceAll(RegExp(r'\s+'), ' ').trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+    if (lines.isEmpty) return '';
+    final kept = <String>[];
+    var wordCount = 0;
+    for (final line in lines) {
+      final words = line.split(' ').where((w) => w.isNotEmpty).toList();
+      if (words.isEmpty) continue;
+      if (wordCount >= 32) break;
+      if (wordCount + words.length > 32) {
+        final remaining = 32 - wordCount;
+        if (remaining > 0) {
+          kept.add(words.take(remaining).join(' '));
+          wordCount = 32;
+        }
+        break;
+      }
+      kept.add(line);
+      wordCount += words.length;
+      if (kept.length >= 8) break;
+    }
+    return kept.join('\n').trim();
   }
 
   String _cleanSignboardText(String text) {
     if (text.isEmpty) return text;
-    final parts = text.split(RegExp(r'\s+'));
-    final kept = <String>[];
-    for (final part in parts) {
-      if (_tokenLooksValid(part)) {
-        kept.add(part);
+    final lines = text.split('\n');
+    final cleanedLines = <String>[];
+    for (final line in lines) {
+      final parts = line.split(RegExp(r'\s+'));
+      final kept = <String>[];
+      for (final part in parts) {
+        if (_isArrowToken(part) || _tokenLooksValid(part)) {
+          kept.add(part);
+        }
+      }
+      final rebuilt = kept.join(' ').trim();
+      if (rebuilt.isNotEmpty) {
+        cleanedLines.add(rebuilt);
       }
     }
-    return kept.join(' ').trim();
+    return cleanedLines.join('\n').trim();
+  }
+
+  bool _isArrowToken(String token) {
+    return token.contains('â†') ||
+        token.contains('â†’') ||
+        token.contains('â¬…') ||
+        token.contains('âž¡') ||
+        token == '<' ||
+        token == '>';
   }
 
   Duration _effectiveOcrInterval(DateTime now) {
@@ -2167,6 +2332,38 @@ class _HomeScreenState extends State<HomeScreen>
     return words.length >= 1 && words.length <= 6 && cleaned.length <= 60;
   }
 
+  bool _hasDirectionalOrWayfindingToken(String text) {
+    if (text.contains('â†') ||
+        text.contains('â†’') ||
+        text.contains('â¬…') ||
+        text.contains('âž¡') ||
+        text.contains('<') ||
+        text.contains('>')) {
+      return true;
+    }
+    final normalized = _normalizeText(text);
+    if (normalized.isEmpty) return false;
+    const tokens = <String>{
+      'left',
+      'right',
+      'ahead',
+      'straight',
+      'exit',
+      'entry',
+      'entrance',
+      'gate',
+      'stairs',
+      'lift',
+      'à¤¨à¤¿à¤•à¤¾à¤¸',
+      'à¤¦à¤¾à¤à¤‚',
+      'à¤¬à¤¾à¤à¤‚',
+    };
+    for (final token in tokens) {
+      if (normalized.contains(token)) return true;
+    }
+    return false;
+  }
+
   bool _lineLooksValid(String text) {
     final cleaned = text.replaceAll(RegExp(r'[^A-Za-z0-9\u0900-\u097F\u0B80-\u0BFF]'), '');
     if (cleaned.length < 2) return false;
@@ -2187,10 +2384,109 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   String _buildSignboardMessage(String text, YoloDetection detection) {
-    final direction = _directionForRect(detection.rect);
+    final spatialDirection = _directionForSignboardRect(detection.rect);
+    final textDirection = _directionHintFromText(text);
+    final direction = textDirection ?? spatialDirection;
     final distanceWord = _distanceDescriptor(detection);
     final directionPhrase = direction == 'ahead' ? 'ahead' : 'on your $direction';
-    return 'Signboard: $text, $distanceWord $directionPhrase.';
+    final concise = _compactSignboardSummary(text);
+    return 'Signboard: $concise, $distanceWord $directionPhrase.';
+  }
+
+  String? _directionHintFromText(String text) {
+    if (text.contains('â†') || text.contains('â¬…')) return 'left';
+    if (text.contains('â†’') || text.contains('âž¡')) return 'right';
+    final rawLower = text.toLowerCase();
+    if (rawLower.contains(' < ') ||
+        rawLower.contains('< ') ||
+        rawLower.contains(' <')) {
+      return 'left';
+    }
+    if (rawLower.contains(' > ') ||
+        rawLower.contains('> ') ||
+        rawLower.contains(' >')) {
+      return 'right';
+    }
+    final normalized = _normalizeText(text);
+    if (normalized.isEmpty) return null;
+    const rightHints = <String>{
+      'right',
+      'to right',
+      'towards right',
+      'à¤¦à¤¾à¤à¤‚',
+      'à¤¦à¤¾à¤¹à¤¿à¤¨à¥‡',
+    };
+    for (final hint in rightHints) {
+      if (normalized.contains(hint)) return 'right';
+    }
+    const leftHints = <String>{
+      'left',
+      'to left',
+      'towards left',
+      'à¤¬à¤¾à¤à¤‚',
+      'à¤¬à¤¾à¤¯à¥€à¤‚',
+    };
+    for (final hint in leftHints) {
+      if (normalized.contains(hint)) return 'left';
+    }
+    const aheadHints = <String>{
+      'ahead',
+      'straight',
+      'forward',
+      'à¤¸à¥€à¤§à¥‡',
+    };
+    for (final hint in aheadHints) {
+      if (normalized.contains(hint)) return 'ahead';
+    }
+    return null;
+  }
+
+  String _compactSignboardSummary(String text) {
+    final cleaned = _cleanSignboardText(text);
+    if (cleaned.isEmpty) return '';
+    final lines = _splitSignboardLines(cleaned);
+    if (lines.isEmpty) return cleaned;
+
+    const priorityTokens = <String>{
+      'emergency',
+      'exit',
+      'entry',
+      'admission',
+      'parking',
+      'toilet',
+      'reception',
+      'lift',
+      'stairs',
+      'hospital',
+      'clinic',
+      'pharmacy',
+    };
+
+    final title = lines.first;
+    String? keyLine;
+    for (final line in lines.skip(1)) {
+      final normalized = _normalizeText(line);
+      if (priorityTokens.any(normalized.contains) || _hasDirectionalOrWayfindingToken(line)) {
+        keyLine = line;
+        break;
+      }
+    }
+
+    final parts = <String>[title];
+    if (keyLine != null && _normalizeText(keyLine) != _normalizeText(title)) {
+      parts.add(keyLine);
+    }
+    final summary = parts.join('. ').replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (summary.length <= 120) return summary;
+    return '${summary.substring(0, 120).trimRight()}...';
+  }
+
+  List<String> _splitSignboardLines(String text) {
+    return text
+        .split('\n')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
   }
 
   Future<void> _speakSignboard(String text, YoloDetection detection) async {
@@ -2212,13 +2508,64 @@ class _HomeScreenState extends State<HomeScreen>
     await _voiceAssistant.speak(message);
   }
 
+  String _directionForSignboardRect(Rect rect) {
+    return _stableDirectionForRect(rect, signboardChannel: true);
+  }
+
   String _directionForRect(Rect rect) {
+    return _stableDirectionForRect(rect, signboardChannel: false);
+  }
+
+  String _stableDirectionForRect(Rect rect, {required bool signboardChannel}) {
     final frame = _lastFrameSize;
     if (frame == null || frame.width <= 0) return 'ahead';
-    final centerX = rect.center.dx / frame.width;
-    if (centerX < 0.35) return 'left';
-    if (centerX > 0.65) return 'right';
-    return 'ahead';
+    final now = DateTime.now();
+    final rawCenterX = (rect.center.dx / frame.width).clamp(0.0, 1.0);
+    final previousDirection = signboardChannel ? _lastSignboardDirection : _lastAlertDirection;
+    final previousAt = signboardChannel ? _lastSignboardDirectionAt : _lastAlertDirectionAt;
+    final previousSmooth = signboardChannel ? _smoothedSignboardCenterX : _smoothedAlertCenterX;
+
+    final stale = now.difference(previousAt) > _directionStateHold;
+    final alpha = signboardChannel ? 0.34 : 0.42;
+    final leftEnter = signboardChannel ? 0.40 : 0.36;
+    final rightEnter = signboardChannel ? 0.60 : 0.64;
+    final leftExit = signboardChannel ? 0.47 : 0.44;
+    final rightExit = signboardChannel ? 0.53 : 0.56;
+    final smoothCenterX = stale ? rawCenterX : (previousSmooth * (1 - alpha) + rawCenterX * alpha);
+
+    String direction = previousDirection;
+    if (stale) {
+      direction = 'ahead';
+    }
+    if (direction == 'left') {
+      if (smoothCenterX > leftExit) {
+        direction = smoothCenterX > rightEnter ? 'right' : 'ahead';
+      }
+    } else if (direction == 'right') {
+      if (smoothCenterX < rightExit) {
+        direction = smoothCenterX < leftEnter ? 'left' : 'ahead';
+      }
+    } else {
+      if (smoothCenterX < leftEnter) {
+        direction = 'left';
+      } else if (smoothCenterX > rightEnter) {
+        direction = 'right';
+      } else {
+        direction = 'ahead';
+      }
+    }
+
+    if (signboardChannel) {
+      _smoothedSignboardCenterX = smoothCenterX;
+      _lastSignboardDirection = direction;
+      _lastSignboardDirectionAt = now;
+    } else {
+      _smoothedAlertCenterX = smoothCenterX;
+      _lastAlertDirection = direction;
+      _lastAlertDirectionAt = now;
+    }
+
+    return direction;
   }
 
   String _distanceDescriptor(YoloDetection detection) {
@@ -2243,11 +2590,60 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
+  String _distanceMetersPhrase(YoloDetection detection) {
+    final distance = detection.distanceMeters;
+    if (distance == null || !distance.isFinite) return '';
+    final rounded = distance.clamp(0.2, 50.0);
+    return '${rounded.toStringAsFixed(1)} meters';
+  }
+
   String _humanizeLabel(String label) {
     final withSpaces = label
         .replaceAll(RegExp(r'[_/]+'), ' ')
         .replaceAllMapped(RegExp(r'([a-z])([A-Z])'), (m) => '${m[1]} ${m[2]}');
     return withSpaces.trim().toLowerCase();
+  }
+
+  bool _isRoadHazardNormalized(String normalized) {
+    return normalized == 'vehiclehazard' ||
+        normalized == 'humannearby' ||
+        normalized == 'animalhazard' ||
+        normalized == 'roadhazard' ||
+        normalized == 'roadsideobstacle';
+  }
+
+  String _canonicalNormalizedForSpeech(String normalized) {
+    switch (normalized) {
+      case 'openeddoor':
+      case 'cabinetdoor':
+      case 'refrigeratordoor':
+        return 'door';
+      default:
+        return normalized;
+    }
+  }
+
+  String _spokenLabelForDetection(YoloDetection detection) {
+    final normalized = _normalizeLabelForAlert(detection.label);
+    if (_isRoadHazardNormalized(normalized)) {
+      final source = detection.sourceLabel?.trim() ?? '';
+      if (source.isNotEmpty) {
+        final sourceNorm = _canonicalNormalizedForSpeech(_normalizeLabelForAlert(source));
+        return _alertSpokenLabels[sourceNorm] ?? _humanizeLabel(source);
+      }
+    }
+    final canonical = _canonicalNormalizedForSpeech(normalized);
+    return _alertSpokenLabels[canonical] ?? _humanizeLabel(detection.label);
+  }
+
+  String _statusLabelForDetection(YoloDetection detection) {
+    final normalized = _normalizeLabelForAlert(detection.label);
+    final spoken = _spokenLabelForDetection(detection);
+    if (_isRoadHazardNormalized(normalized)) {
+      final hazard = _alertSpokenLabels[normalized] ?? _humanizeLabel(detection.label);
+      return '$spoken ($hazard)';
+    }
+    return spoken;
   }
 
   String _capitalize(String text) {
@@ -2260,7 +2656,7 @@ class _HomeScreenState extends State<HomeScreen>
       return _buildHindiAlertMessage(detection);
     }
     final normalized = _normalizeLabelForAlert(detection.label);
-    final spokenLabel = _alertSpokenLabels[normalized] ?? _humanizeLabel(detection.label);
+    final spokenLabel = _spokenLabelForDetection(detection);
     final direction = _directionForRect(detection.rect);
     var distanceWord = _distanceDescriptor(detection);
     if (direction != 'ahead' && distanceWord == 'ahead') {
@@ -2268,7 +2664,9 @@ class _HomeScreenState extends State<HomeScreen>
     }
     final directionPhrase = direction == 'ahead' ? 'ahead' : 'on your $direction';
     final guidance = _alertGuidance[normalized];
-    final base = '${_capitalize(spokenLabel)} $distanceWord $directionPhrase.';
+    final distancePhrase = _distanceMetersPhrase(detection);
+    final distancePart = distancePhrase.isEmpty ? '' : ' at $distancePhrase';
+    final base = '${_capitalize(spokenLabel)} $distanceWord $directionPhrase$distancePart.';
     if (guidance == null) return base;
     return '$base $guidance';
   }
@@ -2299,6 +2697,7 @@ class _HomeScreenState extends State<HomeScreen>
             areaRatio: d.areaRatio,
             proximity: d.proximity,
             distanceMeters: d.distanceMeters,
+            sourceLabel: d.sourceLabel,
           ),
         )
         .toList();
@@ -2313,6 +2712,7 @@ class _HomeScreenState extends State<HomeScreen>
       areaRatio: detection.areaRatio,
       proximity: detection.proximity,
       distanceMeters: detection.distanceMeters,
+      sourceLabel: detection.sourceLabel,
     );
   }
 
@@ -2331,12 +2731,13 @@ class _HomeScreenState extends State<HomeScreen>
       areaRatio: areaRatio,
       proximity: proximity,
       distanceMeters: null,
+      sourceLabel: 'signboard',
     );
   }
 
   String _buildHindiAlertMessage(YoloDetection detection) {
     final normalized = _normalizeLabelForAlert(detection.label);
-    final label = _hindiLabels[normalized] ?? _humanizeLabel(detection.label);
+    final label = _hindiLabels[normalized] ?? _spokenLabelForDetection(detection);
     final direction = _directionForRect(detection.rect);
     var distanceWord = _hindiDistanceDescriptor(detection, direction);
     final directionPhrase = _hindiDirection(direction);
@@ -2344,7 +2745,9 @@ class _HomeScreenState extends State<HomeScreen>
     if (direction != 'ahead' && distanceWord == 'ahead') {
       distanceWord = 'nearby';
     }
-    final base = '${_capitalize(label)} $distanceWord $directionPhrase.';
+    final distancePhrase = _distanceMetersPhrase(detection);
+    final distancePart = distancePhrase.isEmpty ? '' : ' at $distancePhrase';
+    final base = '${_capitalize(label)} $distanceWord $directionPhrase$distancePart.';
     if (guidance == null) return base;
     return '$base $guidance';
   }
@@ -2406,9 +2809,12 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> _maybeSpeakAlerts() async {
     if (_conversationModeEnabled) return;
     if (!_soundEnabled) return;
-    if (_voiceAssistant.isListening.value || _voiceAssistant.isSpeaking.value) return;
+    if (_voiceAssistant.isSpeaking.value) return;
+    if (_voiceAssistant.isListening.value) {
+      if (_intentModeEnabled) return;
+      await _voiceAssistant.stop();
+    }
     final now = DateTime.now();
-    if (now.difference(_lastSignboardSpokenAt) < _signboardPriorityWindow) return;
     if (now.difference(_lastAlertSpokenAt) < _alertSpeakCooldown) return;
 
     final roadAlerts = _filterAlertDetections(_latestDetections, _roadAlertLabels);
@@ -2427,18 +2833,28 @@ class _HomeScreenState extends State<HomeScreen>
       _alertStreaks[label] = current + 1;
     }
 
-    final candidate = _pickMostUrgentAlert(roadAlerts, indoorAlerts);
+    var isFallbackCandidate = false;
+    YoloDetection? candidate = _pickMostUrgentAlert(roadAlerts, indoorAlerts);
+    candidate ??= _pickFallbackDetectionForSpeech();
+    if (candidate != null && roadAlerts.isEmpty && indoorAlerts.isEmpty) {
+      isFallbackCandidate = true;
+    }
     if (candidate == null) return;
-    final candidateLabel = _normalizeLabelForAlert(candidate.label);
-    if ((_alertStreaks[candidateLabel] ?? 0) < _alertStreakTarget) {
-      return;
+    if (!isFallbackCandidate) {
+      final candidateLabel = _normalizeLabelForAlert(candidate.label);
+      if ((_alertStreaks[candidateLabel] ?? 0) < _alertStreakTarget) {
+        return;
+      }
     }
 
     final message = _buildAlertMessage(candidate);
     if (message.trim().isEmpty) return;
 
     final key = _alertKey(candidate);
-    if (key == _lastAlertKey && now.difference(_lastAlertSpokenAt) < const Duration(seconds: 8)) {
+    final dedupeWindow = isFallbackCandidate
+        ? const Duration(seconds: 4)
+        : const Duration(seconds: 8);
+    if (key == _lastAlertKey && now.difference(_lastAlertSpokenAt) < dedupeWindow) {
       return;
     }
 
@@ -2628,7 +3044,7 @@ class _HomeScreenState extends State<HomeScreen>
             try {
               final detections = await _signboardDetector.detect(
                 rgbImage,
-                confThreshold: 0.20,
+                confThreshold: 0.24,
               );
               final scaledDetections = _scaleDetectionsToFrame(detections, rgbImage);
               if (mounted) {
@@ -2645,6 +3061,7 @@ class _HomeScreenState extends State<HomeScreen>
                 final top = sorted.first;
                 _lastSignboardDetection = top;
                 _updateSignboardLandmark(top.rect);
+                _directionForSignboardRect(top.rect);
                 speakTarget = top;
                 rectSources = sorted;
               }
@@ -2657,18 +3074,34 @@ class _HomeScreenState extends State<HomeScreen>
                 if (mounted) {
                   setState(() {
                     _latestOcrText = text;
-                    _latestSmartText = text;
+                    _latestSmartText = 'Analyzing signboard...';
                     _latestSmartEmpty = false;
                     _latestGeminiError = null;
                   });
                 }
+                final shouldUseGeminiForSignboard =
+                    _looksLikeSignboardText(text) && _canAttemptGeminiNow(text, force: true);
+                if (shouldUseGeminiForSignboard) {
+                  unawaited(_maybeSendToGemini(text, image, force: true));
+                } else if (mounted) {
+                  final fallbackSmart = _fallbackSmartTextFromOcr(text);
+                  if (fallbackSmart.isNotEmpty) {
+                    setState(() {
+                      _latestSmartText = fallbackSmart;
+                      _latestSmartEmpty = false;
+                    });
+                  }
+                }
                 _maybePromptCallFromText(text);
                 final landmarkRect = _signboardLandmark;
                 if (speakTarget == null && landmarkRect != null) {
+                  _directionForSignboardRect(landmarkRect);
                   speakTarget = _fallbackSignboardDetection(landmarkRect);
                 }
                 if (speakTarget != null) {
-                  await _speakSignboard(text, speakTarget);
+                  if (!shouldUseGeminiForSignboard) {
+                    await _speakSignboard(text, speakTarget);
+                  }
                 }
               }
             } catch (error) {
@@ -2899,21 +3332,89 @@ class _HomeScreenState extends State<HomeScreen>
   }
 
   String _fallbackSmartTextFromOcr(String text) {
-    final filtered = _filterOcrText(text);
+    final filtered = _filterOcrTextForConversation(text);
     if (filtered.isEmpty) return '';
-    final compact = filtered.replaceAll('\n', ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
-    if (compact.length <= 120) return compact;
-    return '${compact.substring(0, 120).trimRight()}...';
+    final lines = filtered
+        .split('\n')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+    if (lines.isEmpty) return '';
+
+    const priorityTokens = <String>{
+      'emergency',
+      'exit',
+      'admission',
+      'parking',
+      'hospital',
+      'clinic',
+      'pharmacy',
+      'reception',
+      'toilet',
+      'lift',
+      'stairs',
+      'left',
+      'right',
+    };
+    final prioritized = <String>[];
+    final others = <String>[];
+    final seen = <String>{};
+    for (final line in lines) {
+      final normalized = _normalizeText(line);
+      if (normalized.isEmpty || !seen.add(normalized)) continue;
+      final hasPriority = priorityTokens.any(normalized.contains);
+      if (hasPriority) {
+        prioritized.add(line);
+      } else {
+        others.add(line);
+      }
+    }
+
+    final picked = <String>[
+      ...prioritized.take(3),
+      ...others.take((3 - prioritized.length).clamp(0, 3)),
+    ];
+    final compact = picked.join('. ').replaceAll(RegExp(r'\s+'), ' ').trim();
+    if (compact.length <= 140) return compact;
+    return '${compact.substring(0, 140).trimRight()}...';
   }
 
-  Future<void> _maybeSendToGemini(String text, CameraImage image) async {
-    if (_signboardReady) {
+  bool _canAttemptGeminiNow(String text, {bool force = false}) {
+    if (_conversationModeEnabled || _intentModeEnabled) return false;
+    if (_geminiInFlight) return false;
+    if (!_geminiService.hasApiKey) return false;
+    final now = DateTime.now();
+    if (_isGeminiBackoffActive(now)) return false;
+    if (now.difference(_lastGeminiCall) < _geminiCooldown) return false;
+    final cleanedText = text.trim();
+    if (cleanedText.isEmpty) return false;
+    final filteredNormalized = _normalizeText(cleanedText);
+    if (_lastGeminiText.isNotEmpty &&
+        _jaccardSimilarity(filteredNormalized, _lastGeminiText) >= 0.96) {
+      return false;
+    }
+    return true;
+  }
+
+  Future<void> _maybeSendToGemini(
+    String text,
+    CameraImage image, {
+    bool force = false,
+  }) async {
+    if (!_canAttemptGeminiNow(text, force: force)) {
+      if (!_geminiService.hasApiKey) {
+        debugPrint('GEMINI_API_KEY not set. Skipping Gemini.');
+        if (mounted) {
+          setState(() {
+            _latestGeminiError =
+                'Gemini API key missing. Add GEMINI_API_KEY in .env or run with --dart-define=GEMINI_API_KEY=YOUR_KEY';
+            _latestSmartText = '';
+            _latestSmartEmpty = false;
+          });
+        }
+      }
       return;
     }
-    if (_conversationModeEnabled || _intentModeEnabled) {
-      return;
-    }
-    if (_geminiInFlight) return;
     if (!_geminiService.hasApiKey) {
       debugPrint('GEMINI_API_KEY not set. Skipping Gemini.');
       if (mounted) {
@@ -2927,26 +3428,10 @@ class _HomeScreenState extends State<HomeScreen>
       return;
     }
     final now = DateTime.now();
-    // Skip Gemini until quota backoff expires.
-    if (_isGeminiBackoffActive(now)) return;
-    if (now.difference(_lastGeminiCall) < _geminiCooldown) return;
 
-    final filteredText = _filterOcrText(text);
-    if (filteredText.isEmpty) {
-      if (mounted) {
-        setState(() {
-          _latestSmartText = '';
-          _latestSmartEmpty = true;
-          _latestGeminiError = null;
-        });
-      }
-      return;
-    }
+    final filteredText = text.trim();
+    if (filteredText.isEmpty) return;
     final filteredNormalized = _normalizeText(filteredText);
-    if (_lastGeminiText.isNotEmpty &&
-        _jaccardSimilarity(filteredNormalized, _lastGeminiText) >= 0.9) {
-      return;
-    }
 
     final jpegBytes = _buildGeminiImage(image);
     if (jpegBytes == null) {
@@ -3061,12 +3546,31 @@ class _HomeScreenState extends State<HomeScreen>
     }
   }
 
+  bool _shouldUseTextOnlyGeminiConversation(String question, String ocrText) {
+    final q = question.toLowerCase();
+    final asksMenuOrPrice = q.contains('price') ||
+        q.contains('cost') ||
+        q.contains('how much') ||
+        q.contains('rate') ||
+        q.contains('menu') ||
+        q.contains('item');
+    if (!asksMenuOrPrice) return false;
+
+    final hasDigits = RegExp(r'\d').hasMatch(ocrText);
+    final hasCurrency = RegExp(r'(rs\.?|inr|\$)', caseSensitive: false).hasMatch(ocrText);
+    return hasDigits || hasCurrency;
+  }
+
   Future<void> _answerConversation(
     String question,
     String ocrText,
     CameraImage image,
   ) async {
     if (_conversationInFlight) return;
+    if (await _handleVoiceEmergencyCallCommand(question)) {
+      await _maybeContinueConversation();
+      return;
+    }
     _conversationInFlight = true;
 
     if (mounted) {
@@ -3108,20 +3612,26 @@ class _HomeScreenState extends State<HomeScreen>
     }
 
     if (!_geminiService.hasApiKey || _isGeminiBackoffActive()) {
+      final offlineAnswer =
+          _localSignboardAnswerFromOcr(question, cleaned) ??
+          _fallbackSmartTextFromOcr(cleaned);
+      final spoken = offlineAnswer.isNotEmpty
+          ? offlineAnswer
+          : 'I cannot see that answer right now.';
       if (mounted) {
         setState(() {
           _latestGeminiError = !_geminiService.hasApiKey
               ? 'Gemini API key missing. Add GEMINI_API_KEY in .env.'
               : 'Gemini temporarily unavailable due to quota. Using OCR-only mode.';
-          _latestSmartText = 'I cannot see that answer right now.';
-          _latestSmartEmpty = false;
+          _latestSmartText = spoken;
+          _latestSmartEmpty = spoken.isEmpty;
         });
       }
       if (_soundEnabled) {
         if (_voiceAssistant.isListening.value) {
           await _voiceAssistant.stop();
         }
-        await _voiceAssistant.speak('I cannot see that answer right now.');
+        await _voiceAssistant.speak(spoken);
       }
       _conversationInFlight = false;
       await _maybeContinueConversation();
@@ -3130,18 +3640,22 @@ class _HomeScreenState extends State<HomeScreen>
 
     final filteredText = _filterOcrTextForConversation(cleaned);
     final textForGemini = filteredText.isNotEmpty ? filteredText : cleaned;
-    final jpegBytes = _buildGeminiImage(image);
-    if (jpegBytes == null) {
-      if (mounted) {
-        setState(() {
-          _latestGeminiError = 'Unable to prepare camera image for Gemini.';
-          _latestSmartText = '';
-          _latestSmartEmpty = false;
-        });
+    final useTextOnlyGemini = _shouldUseTextOnlyGeminiConversation(question, textForGemini);
+    Uint8List? jpegBytes;
+    if (!useTextOnlyGemini) {
+      jpegBytes = _buildGeminiImage(image);
+      if (jpegBytes == null) {
+        if (mounted) {
+          setState(() {
+            _latestGeminiError = 'Unable to prepare camera image for Gemini.';
+            _latestSmartText = '';
+            _latestSmartEmpty = false;
+          });
+        }
+        _conversationInFlight = false;
+        await _maybeContinueConversation();
+        return;
       }
-      _conversationInFlight = false;
-      await _maybeContinueConversation();
-      return;
     }
 
     try {
@@ -3153,8 +3667,11 @@ class _HomeScreenState extends State<HomeScreen>
       );
       _registerGeminiSuccess();
       if (result == null) {
-        final fallback = _localAnswerFromOcr(question, cleaned);
-        if (fallback != null && fallback.trim().isNotEmpty) {
+        final fallback =
+            _localAnswerFromOcr(question, cleaned) ??
+            _localSignboardAnswerFromOcr(question, cleaned) ??
+            _fallbackSmartTextFromOcr(cleaned);
+        if (fallback.trim().isNotEmpty) {
           if (mounted) {
             setState(() {
               _latestSmartText = fallback;
@@ -3202,8 +3719,11 @@ class _HomeScreenState extends State<HomeScreen>
     } catch (error) {
       debugPrint('Conversation error: $error');
       _registerGeminiFailure(error);
-      final fallback = _localAnswerFromOcr(question, cleaned);
-      if (fallback != null && fallback.trim().isNotEmpty) {
+      final fallback =
+          _localAnswerFromOcr(question, cleaned) ??
+          _localSignboardAnswerFromOcr(question, cleaned) ??
+          _fallbackSmartTextFromOcr(cleaned);
+      if (fallback.trim().isNotEmpty) {
         if (mounted) {
           setState(() {
             _latestSmartText = fallback;
@@ -3308,7 +3828,7 @@ class _HomeScreenState extends State<HomeScreen>
   Future<void> _announceIntentMatch(String intentName, Rect? focusRect) async {
     if (_conversationModeEnabled) return;
     final now = DateTime.now();
-    final direction = focusRect != null ? _directionForRect(focusRect) : 'ahead';
+    final direction = focusRect != null ? _directionForSignboardRect(focusRect) : 'ahead';
     final canonical = _canonicalIntentName(intentName);
     final directionPhrase =
         direction == 'ahead' ? 'ahead' : 'on your ${direction}';
@@ -3437,19 +3957,88 @@ class _HomeScreenState extends State<HomeScreen>
     return false;
   }
 
-  Future<void> _launchCall(String number) async {
-    final uri = Uri(scheme: 'tel', path: number);
-    final canLaunch = await canLaunchUrl(uri);
-    if (!canLaunch) {
+  Future<bool> _handleVoiceEmergencyCallCommand(String spokenText) async {
+    final normalized = _normalizeText(spokenText);
+    if (normalized.isEmpty) return false;
+    final hasCallIntent = normalized.contains('call') ||
+        normalized.contains('dial') ||
+        normalized.contains('ring') ||
+        normalized.contains('phone');
+    if (!hasCallIntent) return false;
+    if (!_refersToEmergencyContact(normalized)) return false;
+    await _callSavedEmergencyContact();
+    return true;
+  }
+
+  bool _refersToEmergencyContact(String normalizedSpokenText) {
+    if (normalizedSpokenText.contains('emergency contact') ||
+        normalizedSpokenText.contains('emergency') ||
+        normalizedSpokenText.contains('sos')) {
+      return true;
+    }
+    final savedName = _normalizeText(_emergencyContactName);
+    if (savedName.isEmpty) return false;
+    final nameTokens = savedName.split(' ').where((t) => t.length >= 2).toList();
+    if (nameTokens.isEmpty) return false;
+    var matched = 0;
+    for (final token in nameTokens) {
+      if (normalizedSpokenText.contains(token)) {
+        matched += 1;
+      }
+    }
+    return matched >= (nameTokens.length >= 2 ? 2 : 1);
+  }
+
+  Future<void> _callSavedEmergencyContact() async {
+    final number = _emergencyContactNumber.trim();
+    if (number.isEmpty) {
       if (mounted) {
         setState(() {
-          _latestSmartText = 'Unable to place the call.';
+          _latestSmartText = 'Emergency contact number is not set.';
+          _latestSmartEmpty = false;
+        });
+      }
+      if (_soundEnabled && !_voiceAssistant.isListening.value && !_voiceAssistant.isSpeaking.value) {
+        await _voiceAssistant.speak('Emergency contact number is not set.');
+      }
+      return;
+    }
+    final spokenName = _emergencyContactName.trim();
+    if (_soundEnabled && !_voiceAssistant.isListening.value && !_voiceAssistant.isSpeaking.value) {
+      final namePart = spokenName.isEmpty ? 'emergency contact' : spokenName;
+      unawaited(_voiceAssistant.speak('Calling $namePart.'));
+    }
+    await _launchCall(number);
+  }
+
+  Future<void> _launchCall(String number) async {
+    final normalized = _normalizePhoneNumber(number);
+    if (normalized.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _latestSmartText = 'Unable to place the call. Invalid phone number.';
           _latestSmartEmpty = false;
         });
       }
       return;
     }
-    await launchUrl(uri, mode: LaunchMode.externalApplication);
+    final uri = Uri.parse('tel:$normalized');
+    try {
+      final opened = await launchUrl(uri, mode: LaunchMode.platformDefault);
+      if (!opened && mounted) {
+        setState(() {
+          _latestSmartText = 'Unable to place the call. No dialer app found.';
+          _latestSmartEmpty = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _latestSmartText = 'Unable to place the call. Please check dialer permission/app.';
+          _latestSmartEmpty = false;
+        });
+      }
+    }
   }
 
   Future<void> _loadEmergencyContact() async {
@@ -3690,35 +4279,177 @@ class _HomeScreenState extends State<HomeScreen>
   String? _localAnswerFromOcr(String question, String ocrText) {
     final q = question.toLowerCase();
     final items = _parseMenuItems(ocrText);
-    if (items.isEmpty) return null;
+    if (items.isNotEmpty) {
+      if (q.contains('cheapest') || q.contains('lowest') || q.contains('least expensive')) {
+        final cheapest = items.reduce((a, b) => a.price <= b.price ? a : b);
+        return 'The cheapest item is ${cheapest.name} at ${_formatPrice(cheapest)}.';
+      }
+      if (q.contains('most expensive') || q.contains('costliest') || q.contains('highest')) {
+        final costliest = items.reduce((a, b) => a.price >= b.price ? a : b);
+        return 'The most expensive item is ${costliest.name} at ${_formatPrice(costliest)}.';
+      }
 
-    if (q.contains('cheapest') || q.contains('lowest') || q.contains('least expensive')) {
-      final cheapest = items.reduce((a, b) => a.price <= b.price ? a : b);
-      return 'The cheapest item is ${cheapest.name} at ${_formatPrice(cheapest)}.';
-    }
-    if (q.contains('most expensive') || q.contains('costliest') || q.contains('highest')) {
-      final costliest = items.reduce((a, b) => a.price >= b.price ? a : b);
-      return 'The most expensive item is ${costliest.name} at ${_formatPrice(costliest)}.';
-    }
-
-    if (q.contains('price') || q.contains('cost') || q.contains('how much')) {
-      final qTokens = q.split(RegExp(r'[^a-z0-9]+')).where((t) => t.length > 2).toSet();
-      _MenuItem? best;
-      var bestScore = 0;
-      for (final item in items) {
-        final nameTokens =
-            item.name.toLowerCase().split(RegExp(r'[^a-z0-9]+')).where((t) => t.length > 2);
-        var score = 0;
-        for (final token in nameTokens) {
-          if (qTokens.contains(token)) score++;
+      final asksPrice = q.contains('price') ||
+          q.contains('cost') ||
+          q.contains('how much') ||
+          q.contains('rate') ||
+          q.contains('menu');
+      if (asksPrice) {
+        final qTokens = q.split(RegExp(r'[^a-z0-9]+')).where((t) => t.length > 2).toSet();
+        _MenuItem? best;
+        var bestScore = 0;
+        for (final item in items) {
+          final nameTokens =
+              item.name.toLowerCase().split(RegExp(r'[^a-z0-9]+')).where((t) => t.length > 2);
+          var score = 0;
+          for (final token in nameTokens) {
+            if (qTokens.contains(token)) {
+              score += 2;
+            } else if (q.contains(token)) {
+              score += 1;
+            }
+          }
+          if (score > bestScore) {
+            bestScore = score;
+            best = item;
+          }
         }
-        if (score > bestScore) {
-          bestScore = score;
-          best = item;
+        if (best != null && bestScore > 0) {
+          return '${best.name} costs ${_formatPrice(best)}.';
+        }
+        if (items.length == 1) {
+          final only = items.first;
+          return '${only.name} costs ${_formatPrice(only)}.';
         }
       }
-      if (best != null && bestScore > 0) {
-        return '${best.name} costs ${_formatPrice(best)}.';
+    }
+
+    final signboardAnswer = _localSignboardAnswerFromOcr(question, ocrText);
+    if (signboardAnswer != null && signboardAnswer.trim().isNotEmpty) {
+      return signboardAnswer;
+    }
+
+    return null;
+  }
+
+  String? _localSignboardAnswerFromOcr(String question, String ocrText) {
+    final q = _normalizeText(question);
+    final cleaned = _filterOcrTextForConversation(ocrText);
+    if (q.isEmpty || cleaned.isEmpty) return null;
+    final lines = cleaned
+        .split('\n')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty)
+        .toList();
+    if (lines.isEmpty) return null;
+    final normalizedAll = _normalizeText(lines.join(' '));
+
+    String? pickTarget() {
+      const targets = <String, List<String>>{
+        'emergency': ['emergency', 'er', 'casualty'],
+        'admissions': ['admission', 'admissions', 'registration'],
+        'parking': ['parking', 'visitor parking', 'visitors parking'],
+        'exit': ['exit', 'way out', '\u0928\u093f\u0915\u093e\u0938'],
+        'toilet': ['toilet', 'washroom', 'restroom'],
+        'reception': ['reception', 'help desk', 'information'],
+        'lift': ['lift', 'elevator'],
+        'stairs': ['stairs', 'stair'],
+      };
+      for (final entry in targets.entries) {
+        for (final alias in entry.value) {
+          if (q.contains(_normalizeText(alias))) return entry.key;
+        }
+      }
+      return null;
+    }
+
+    final target = pickTarget();
+    final asksDirection = q.contains('where') ||
+        q.contains('which side') ||
+        q.contains('left') ||
+        q.contains('right') ||
+        q.contains('direction') ||
+        q.contains('kidar') ||
+        q.contains('kidhar') ||
+        q.contains('kaha');
+
+    String? directionForLine(String line) {
+      final l = line.toLowerCase();
+      if (l.contains('\u2190') ||
+          l.contains('<') ||
+          l.contains(' left ') ||
+          l.startsWith('left') ||
+          l.contains(' towards left ')) {
+        return 'left';
+      }
+      if (l.contains('\u2192') ||
+          l.contains('>') ||
+          l.contains(' right ') ||
+          l.startsWith('right') ||
+          l.contains(' towards right ')) {
+        return 'right';
+      }
+      if (l.contains('\u2191') ||
+          l.contains(' ahead ') ||
+          l.contains(' straight ') ||
+          l.contains(' forward ')) {
+        return 'ahead';
+      }
+      return null;
+    }
+
+    if (target != null) {
+      final targetAliases = <String>{
+        target,
+        if (target == 'exit') _normalizeText('\u0928\u093f\u0915\u093e\u0938'),
+      };
+      final matching = lines.where((line) {
+        final normalizedLine = _normalizeText(line);
+        return targetAliases.any(normalizedLine.contains);
+      }).toList();
+      if (matching.isNotEmpty) {
+        for (final line in matching) {
+          final dir = directionForLine(line);
+          if (dir != null) {
+            final phrase = dir == 'ahead' ? 'ahead' : 'on your $dir';
+            return '$target is $phrase.';
+          }
+        }
+        if (asksDirection) {
+          return '$target is visible on the signboard.';
+        }
+        return '$target is listed on the signboard.';
+      }
+      if (asksDirection && targetAliases.any(normalizedAll.contains)) {
+        return '$target is shown on this signboard.';
+      }
+    }
+
+    if (q.contains('what place') ||
+        q.contains('where am i') ||
+        q.contains('which place') ||
+        q.contains('what is this')) {
+      final headline = lines.first;
+      final compact = headline.replaceAll(RegExp(r'\s+'), ' ').trim();
+      if (compact.isNotEmpty) {
+        return 'This looks like $compact.';
+      }
+    }
+
+    final qTokens = q
+        .split(RegExp(r'[^a-z0-9\u0900-\u097F\u0B80-\u0BFF]+'))
+        .where((t) => t.length >= 4)
+        .toList();
+    for (final token in qTokens) {
+      for (final line in lines) {
+        if (_normalizeText(line).contains(token)) {
+          final dir = directionForLine(line);
+          if (dir != null && asksDirection) {
+            final phrase = dir == 'ahead' ? 'ahead' : 'on your $dir';
+            return '$token is $phrase.';
+          }
+          return line.replaceAll(RegExp(r'\s+'), ' ').trim();
+        }
       }
     }
 
@@ -3741,21 +4472,27 @@ class _HomeScreenState extends State<HomeScreen>
     final lines = ocrText.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).toList();
     final items = <_MenuItem>[];
     final priceRegex = RegExp(
-      r'((?:rs\\.?|inr|\\$)\\s*)?(\\d+(?:[.,]\\d{2})?)',
+      r'(?:(rs\.?|inr|\$)\s*)?(\d+(?:[.,]\d{1,2})?)\b',
       caseSensitive: false,
     );
     final defaultCurrency = _detectCurrency(ocrText);
     String? pendingName;
     for (final line in lines) {
-      final matches = priceRegex.allMatches(line).toList();
-      final hasLetters = RegExp(r'[A-Za-z\u0900-\u097F\u0B80-\u0BFF]').hasMatch(line);
+      final normalizedLine = line.replaceAll(RegExp(r'^[\-\*\u2022\|:]+'), '').trim();
+      final matches = priceRegex.allMatches(normalizedLine).toList();
+      final hasLetters =
+          RegExp(r'[A-Za-z\u0900-\u097F\u0B80-\u0BFF]').hasMatch(normalizedLine);
       if (matches.isNotEmpty) {
         final match = matches.last;
         final currencyToken = (match.group(1) ?? '').trim();
         final rawNumber = (match.group(2) ?? '').replaceAll(',', '.');
         final price = double.tryParse(rawNumber);
         if (price == null) continue;
-        var name = line.replaceAll(priceRegex, ' ').replaceAll(RegExp(r'\\s+'), ' ').trim();
+        var name = normalizedLine
+            .replaceAll(match.group(0) ?? '', ' ')
+            .replaceAll(RegExp(r'[\-:\.\u2022]{2,}'), ' ')
+            .replaceAll(RegExp(r'\s+'), ' ')
+            .trim();
         if (name.isEmpty && pendingName != null) {
           name = pendingName;
         }
@@ -3765,7 +4502,7 @@ class _HomeScreenState extends State<HomeScreen>
           pendingName = null;
         }
       } else if (hasLetters) {
-        pendingName = line;
+        pendingName = normalizedLine;
       }
     }
     return items;
@@ -4107,5 +4844,3 @@ class _HomeScreenState extends State<HomeScreen>
     );
   }
 }
-
-

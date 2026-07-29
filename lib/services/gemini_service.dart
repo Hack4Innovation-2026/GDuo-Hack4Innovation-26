@@ -11,13 +11,13 @@ class GeminiService {
     String? model,
   })  : _apiKey = _firstNonEmpty([
           apiKey,
-          const String.fromEnvironment('GEMINI_API_KEY'),
           dotenv.isInitialized ? dotenv.env['GEMINI_API_KEY'] : null,
+          const String.fromEnvironment('GEMINI_API_KEY'),
         ]),
         _model = _firstNonEmpty([
           model,
-          const String.fromEnvironment('GEMINI_MODEL'),
           dotenv.isInitialized ? dotenv.env['GEMINI_MODEL'] : null,
+          const String.fromEnvironment('GEMINI_MODEL'),
           'gemini-2.5-flash',
         ]);
 
@@ -28,10 +28,20 @@ class GeminiService {
 
   static String _firstNonEmpty(List<String?> values) {
     for (final value in values) {
-      final trimmed = value?.trim() ?? '';
-      if (trimmed.isNotEmpty) return trimmed;
+      final normalized = _normalizeConfigValue(value);
+      if (normalized.isNotEmpty) return normalized;
     }
     return '';
+  }
+
+  static String _normalizeConfigValue(String? value) {
+    final trimmed = value?.trim() ?? '';
+    if (trimmed.isEmpty) return '';
+    if ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+        (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+      return trimmed.substring(1, trimmed.length - 1).trim();
+    }
+    return trimmed;
   }
 
   bool get hasApiKey => _apiKey.isNotEmpty;
@@ -117,6 +127,7 @@ If nothing useful exists, return {"speak":"","action":null}.
       'generation_config': {
         'temperature': 0.1,
         'max_output_tokens': 120,
+        'response_mime_type': 'application/json',
       },
     });
 
@@ -138,7 +149,7 @@ If nothing useful exists, return {"speak":"","action":null}.
   Future<GeminiResult?> analyzeConversation({
     required String question,
     required String ocrText,
-    required Uint8List jpegBytes,
+    Uint8List? jpegBytes,
     String? preferredLanguage,
   }) async {
     if (_apiKey.isEmpty) return null;
@@ -165,6 +176,18 @@ or
 If nothing useful exists, return {"speak":"","action":null}.
 ''';
 
+    final parts = <Map<String, dynamic>>[
+      {'text': prompt},
+    ];
+    if (jpegBytes != null && jpegBytes.isNotEmpty) {
+      parts.add({
+        'inline_data': {
+          'mime_type': 'image/jpeg',
+          'data': base64Encode(jpegBytes),
+        },
+      });
+    }
+
     final body = jsonEncode({
       'systemInstruction': {
         'parts': [
@@ -174,20 +197,13 @@ If nothing useful exists, return {"speak":"","action":null}.
       'contents': [
         {
           'role': 'user',
-          'parts': [
-            {'text': prompt},
-            {
-              'inline_data': {
-                'mime_type': 'image/jpeg',
-                'data': base64Encode(jpegBytes),
-              },
-            },
-          ],
+          'parts': parts,
         },
       ],
       'generation_config': {
         'temperature': 0.2,
         'max_output_tokens': 140,
+        'response_mime_type': 'application/json',
       },
     });
 
@@ -247,6 +263,7 @@ or
       'generation_config': {
         'temperature': 0.1,
         'max_output_tokens': 60,
+        'response_mime_type': 'application/json',
       },
     });
 
@@ -267,6 +284,7 @@ or
     final candidates = <String>[
       _model,
       'gemini-2.5-flash',
+      'gemini-2.0-flash',
       'gemini-2.5-flash-latest',
       'gemini-2.5-pro',
       'gemini-2.5-pro-latest',
@@ -274,29 +292,32 @@ or
       'gemini-1.5-flash',
       'gemini-1.5-flash-latest',
     ];
+    const apiVersions = <String>['v1', 'v1beta'];
     http.Response? lastResponse;
     final seen = <String>{};
-    for (final model in candidates) {
-      final trimmed = model.trim();
-      if (trimmed.isEmpty || !seen.add(trimmed)) continue;
+    for (final apiVersion in apiVersions) {
+      for (final model in candidates) {
+        final trimmed = model.trim();
+        if (trimmed.isEmpty || !seen.add('$apiVersion::$trimmed')) continue;
 
-      final uri = Uri.parse(
-        'https://generativelanguage.googleapis.com/v1beta/models/$trimmed:generateContent?key=$_apiKey',
-      );
-      final response = await http
-          .post(
-            uri,
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: body,
-          )
-          .timeout(_requestTimeout);
+        final uri = Uri.parse(
+          'https://generativelanguage.googleapis.com/$apiVersion/models/$trimmed:generateContent?key=$_apiKey',
+        );
+        final response = await http
+            .post(
+              uri,
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: body,
+            )
+            .timeout(_requestTimeout);
 
-      lastResponse = response;
-      if (response.statusCode == 200) return response;
-      // 404 = model not found, 403 = model not accessible/preview-only - try next.
-      if (response.statusCode != 404 && response.statusCode != 403) return response;
+        lastResponse = response;
+        if (response.statusCode == 200) return response;
+        // 404 = model not found, 403 = model not accessible/permission issue - try next.
+        if (response.statusCode != 404 && response.statusCode != 403) return response;
+      }
     }
 
     if (lastResponse != null) return lastResponse;

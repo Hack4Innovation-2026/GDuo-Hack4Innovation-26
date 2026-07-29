@@ -15,6 +15,7 @@ class YoloDetection {
     required this.areaRatio,
     required this.proximity,
     required this.distanceMeters,
+    this.sourceLabel,
   });
 
   final int classId;
@@ -24,6 +25,7 @@ class YoloDetection {
   final double areaRatio;
   final String proximity;
   final double? distanceMeters;
+  final String? sourceLabel;
 }
 
 class _LetterboxResult {
@@ -60,7 +62,9 @@ class YoloDetectorService {
     this.inputSize = 640,
     this.cameraFovDegrees = 60.0,
     this.defaultObjectHeightM = 1.5,
+    this.defaultObjectWidthM = 0.8,
     Map<String, double>? objectHeightsMeters,
+    Map<String, double>? objectWidthsMeters,
   }) : objectHeightsMeters = objectHeightsMeters ??
             const {
               'door': 2.0,
@@ -79,6 +83,37 @@ class YoloDetectorService {
               'roadside': 2.5,
               'electric_pole': 2.5,
               'road': 1.0,
+              'car': 1.45,
+              'bus': 3.0,
+              'truck': 3.2,
+              'motorcycle': 1.2,
+              'ambulance': 2.4,
+              'person': 1.7,
+            },
+       objectWidthsMeters = objectWidthsMeters ??
+            const {
+              'door': 0.9,
+              'openedDoor': 0.9,
+              'cabinetDoor': 0.55,
+              'refrigeratorDoor': 0.65,
+              'window': 1.2,
+              'chair': 0.55,
+              'table': 1.1,
+              'cabinet': 1.0,
+              'sofa/couch': 1.8,
+              'couch': 1.8,
+              'pole': 0.25,
+              'vehicle': 1.9,
+              'living': 0.45,
+              'roadside': 1.0,
+              'electric_pole': 0.35,
+              'road': 3.0,
+              'car': 1.8,
+              'bus': 2.5,
+              'truck': 2.6,
+              'motorcycle': 0.8,
+              'ambulance': 2.2,
+              'person': 0.45,
             };
 
   final String modelAsset;
@@ -86,8 +121,10 @@ class YoloDetectorService {
   final int inputSize;
   final double cameraFovDegrees;
   final double defaultObjectHeightM;
+  final double defaultObjectWidthM;
 
   final Map<String, double> objectHeightsMeters;
+  final Map<String, double> objectWidthsMeters;
 
   OrtSession? _session;
   List<String> _labels = const [];
@@ -203,6 +240,7 @@ class YoloDetectorService {
       final label = bestClass < _labels.length ? _labels[bestClass] : 'class_$bestClass';
       final double? distanceMeters = _estimateDistanceMeters(
         rect: rect,
+        imageWidth: prep.origWidth.toDouble(),
         imageHeight: prep.origHeight.toDouble(),
         label: label,
       );
@@ -218,6 +256,7 @@ class YoloDetectorService {
           areaRatio: areaRatio,
           proximity: proximity,
           distanceMeters: distanceMeters,
+          sourceLabel: label,
         ),
       );
     }
@@ -336,21 +375,78 @@ class YoloDetectorService {
 
   double? _estimateDistanceMeters({
     required Rect rect,
+    required double imageWidth,
     required double imageHeight,
     required String label,
   }) {
-    if (rect.height <= 1) return null;
+    if (rect.height <= 1 || rect.width <= 1 || imageWidth <= 0 || imageHeight <= 0) {
+      return null;
+    }
     final normalized = label.trim().toLowerCase();
     if (_distanceIgnoredLabels.contains(normalized)) {
       return null;
     }
-    final double objectHeightM = objectHeightsMeters[label] ?? defaultObjectHeightM;
-    if (objectHeightM <= 0) return null;
-    final double fovRadians = cameraFovDegrees * pi / 180.0;
-    final double focalPx = imageHeight / (2 * tan(fovRadians / 2));
-    final double distance = (objectHeightM * focalPx) / rect.height;
-    if (distance.isNaN || distance.isInfinite) return null;
-    return distance;
+    final resolvedLabel = _resolveCanonicalLabel(label);
+    final double objectHeightM = _lookupObjectHeight(resolvedLabel);
+    final double objectWidthM = _lookupObjectWidth(resolvedLabel);
+
+    final double verticalFovRadians = cameraFovDegrees * pi / 180.0;
+    final double focalY = imageHeight / (2 * tan(verticalFovRadians / 2));
+    final double horizontalFovRadians =
+        2 * atan((imageWidth / imageHeight) * tan(verticalFovRadians / 2));
+    final double focalX = imageWidth / (2 * tan(horizontalFovRadians / 2));
+
+    double? fromHeight;
+    if (objectHeightM > 0 && rect.height > 1) {
+      final estimate = (objectHeightM * focalY) / rect.height;
+      if (estimate.isFinite && estimate > 0) fromHeight = estimate;
+    }
+    double? fromWidth;
+    if (objectWidthM > 0 && rect.width > 1) {
+      final estimate = (objectWidthM * focalX) / rect.width;
+      if (estimate.isFinite && estimate > 0) fromWidth = estimate;
+    }
+
+    double? distance;
+    if (fromHeight != null && fromWidth != null) {
+      final aspect = rect.height / rect.width;
+      final heightWeight = aspect >= 1.0 ? 0.65 : 0.45;
+      distance = fromHeight * heightWeight + fromWidth * (1.0 - heightWeight);
+    } else {
+      distance = fromHeight ?? fromWidth;
+    }
+    if (distance == null || !distance.isFinite || distance <= 0) return null;
+
+    final calibration = _distanceCalibrationByLabel[resolvedLabel] ?? 1.0;
+    final calibrated = distance * calibration;
+    return calibrated.clamp(0.2, 50.0);
+  }
+
+  String _resolveCanonicalLabel(String label) {
+    final normalized = _normalizeLabel(label);
+    return _labelAliases[normalized] ?? normalized;
+  }
+
+  String _normalizeLabel(String label) {
+    return label.trim().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '');
+  }
+
+  double _lookupObjectHeight(String canonicalLabel) {
+    for (final entry in objectHeightsMeters.entries) {
+      if (_normalizeLabel(entry.key) == canonicalLabel) {
+        return entry.value;
+      }
+    }
+    return defaultObjectHeightM;
+  }
+
+  double _lookupObjectWidth(String canonicalLabel) {
+    for (final entry in objectWidthsMeters.entries) {
+      if (_normalizeLabel(entry.key) == canonicalLabel) {
+        return entry.value;
+      }
+    }
+    return defaultObjectWidthM;
   }
 
   static const Set<String> _distanceIgnoredLabels = {
@@ -359,6 +455,38 @@ class YoloDetectorService {
     'far',
     'sky',
     'road',
+  };
+
+  static const Map<String, String> _labelAliases = {
+    'openeddoor': 'door',
+    'cabinetdoor': 'cabinetdoor',
+    'refrigeratordoor': 'refrigeratordoor',
+    'electricpole': 'pole',
+    'powerpole': 'pole',
+    'living': 'person',
+    'person': 'person',
+    'vehicle': 'car',
+    'ambulance': 'ambulance',
+    'motorcycle': 'motorcycle',
+    'bus': 'bus',
+    'truck': 'truck',
+    'car': 'car',
+  };
+
+  static const Map<String, double> _distanceCalibrationByLabel = {
+    'person': 0.95,
+    'car': 0.92,
+    'bus': 0.90,
+    'truck': 0.90,
+    'motorcycle': 0.92,
+    'ambulance': 0.92,
+    'door': 0.93,
+    'cabinetdoor': 0.9,
+    'refrigeratordoor': 0.9,
+    'chair': 0.88,
+    'table': 0.9,
+    'couch': 0.92,
+    'pole': 0.95,
   };
 
   List<YoloDetection> _nonMaxSuppression(List<YoloDetection> dets, double iouThreshold) {
